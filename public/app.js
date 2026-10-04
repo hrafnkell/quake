@@ -500,7 +500,17 @@ function render3d(list, win) {
   const mapLines = outline
     ? [outlineTrace(outline.glaciers, r, css('--glacier'), 2), outlineTrace(outline.coast, r, css('--ink-2'), 3)]
     : [];
-  Plotly.react('plot3d', [...mapLines, trace], {
+  // Upptök á yfirborði (dýpt 0) svo sjáist hvar skjálftinn er óháð sjónarhorni
+  const epicenters = {
+    type: 'scatter3d',
+    mode: 'markers',
+    x: trace.x,
+    y: trace.y,
+    z: list.map(() => 0),
+    marker: { size: 3.5, color: css('--ink-2'), opacity: 0.7, line: { width: 0 } },
+    hoverinfo: 'skip',
+  };
+  Plotly.react('plot3d', [...mapLines, epicenters, trace], {
     margin: { l: 0, r: 0, t: 0, b: 0 },
     showlegend: false,
     paper_bgcolor: 'transparent',
