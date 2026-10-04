@@ -1,5 +1,6 @@
-index.html
-bubb.html
+node_modules/
+data/
+*.db
+*.db-*
 .venv/
 __pycache__/
-*.db

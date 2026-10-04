@@ -1,0 +1,31 @@
+[Unit]
+Description=Jarðskjálftakort (quake)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=quake
+Group=quake
+WorkingDirectory=/opt/quake
+ExecStart=/usr/local/bin/bun run src/server.ts
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=DB_PATH=/var/lib/quake/quakes.db
+Environment=POLL_SECONDS=300
+# Kerfisnotandinn hefur ekkert heimasvæði til að skrifa skyndiminni í
+Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
+# Býr til /var/lib/quake í eigu quake notandans
+StateDirectory=quake
+Restart=always
+RestartSec=5
+
+# Hersla
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+
+[Install]
+WantedBy=multi-user.target

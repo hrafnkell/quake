@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="is">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jarðskjálftar</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Jarðskjálftar <span id="region-name"></span></h1>
+      <p class="sub">Gögn frá <a href="https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar">Veðurstofu Íslands</a>. Tímar eru íslenskir.</p>
+    </div>
+    <div class="live">
+      <span id="status-dot" class="dot"></span>
+      <span id="status-text">Hleð…</span>
+      <label class="toggle"><input type="checkbox" id="auto" checked> Uppfæra sjálfkrafa</label>
+    </div>
+  </header>
+
+  <form id="filters" class="filters" onsubmit="return false">
+    <label>Svæði
+      <select id="region"></select>
+    </label>
+    <div class="field">
+      <span class="label">Tímabil</span>
+      <div class="segmented" id="presets">
+        <button type="button" data-preset="24h">24 klst</button>
+        <button type="button" data-preset="48h">48 klst</button>
+        <button type="button" data-preset="7d">7 dagar</button>
+        <button type="button" data-preset="30d">30 dagar</button>
+        <button type="button" data-preset="1y">Ár</button>
+        <button type="button" data-preset="all">Allt</button>
+        <button type="button" data-preset="custom">Sérsniðið</button>
+      </div>
+    </div>
+    <div class="field custom-range" id="custom-range" hidden>
+      <label>Frá <input type="datetime-local" id="from"></label>
+      <label>Til <input type="datetime-local" id="to"></label>
+    </div>
+    <div class="field">
+      <span class="label">Stærð</span>
+      <div class="mag-range">
+        <input type="number" id="min-mag" step="0.5" min="-1" max="9" placeholder="frá" aria-label="Lágmarksstærð">
+        <span>–</span>
+        <input type="number" id="max-mag" step="0.5" min="-1" max="9" placeholder="til" aria-label="Hámarksstærð">
+      </div>
+    </div>
+  </form>
+
+  <section class="stats" id="stats"></section>
+
+  <main>
+    <div class="tabs" role="tablist">
+      <button type="button" role="tab" data-view="map">Kort</button>
+      <button type="button" role="tab" data-view="3d">3D</button>
+      <button type="button" role="tab" data-view="table">Tafla</button>
+      <span id="brush-chip" class="chip" hidden>
+        <span id="brush-text"></span>
+        <button type="button" id="brush-clear" aria-label="Hreinsa tímaval">✕</button>
+      </span>
+    </div>
+    <div class="view" id="view-map"><div id="map"></div></div>
+    <div class="view" id="view-3d" hidden><div id="plot3d"></div></div>
+    <div class="view" id="view-table" hidden><div class="table-wrap"><table id="table"></table></div></div>
+
+    <section class="timeline-card">
+      <div class="card-head">
+        <h2>Tímalína</h2>
+        <span class="hint">Dragðu yfir tímalínuna til að skoða tímabil, tvísmelltu til að hreinsa</span>
+      </div>
+      <div id="timeline"></div>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
