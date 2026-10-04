@@ -6,14 +6,17 @@ export type Region = {
 };
 
 // Svæðin eru grófir rammar, breyttu að vild. Öll gögn eru geymd, svæði eru bara sía.
+export const DEFAULT_REGION = 'island';
+
 export const REGIONS: Region[] = [
+  // Enginn rammi svo skjálftar á hryggjum utan við land skili sér líka
+  { id: 'island', name: 'Allt landið', lat: [-90, 90], lon: [-180, 180] },
   { id: 'reykjanes', name: 'Reykjanesskagi', lat: [63.5, 64.5], lon: [-23.5, -21.0] },
   { id: 'hengill', name: 'Hengill', lat: [63.95, 64.2], lon: [-21.6, -21.0] },
   { id: 'katla', name: 'Mýrdalsjökull', lat: [63.45, 63.8], lon: [-19.6, -18.7] },
   { id: 'vatnajokull', name: 'Vatnajökull', lat: [63.95, 64.85], lon: [-18.2, -15.6] },
   { id: 'askja', name: 'Askja og Herðubreið', lat: [64.85, 65.35], lon: [-17.2, -16.0] },
   { id: 'nordurland', name: 'Tjörnesbrotabeltið', lat: [65.8, 66.8], lon: [-19.6, -16.4] },
-  { id: 'island', name: 'Allt landið', lat: [62.8, 67.2], lon: [-25.5, -12.5] },
 ];
 
 // Örnefni fyrir 3D sýn (kortið sýnir örnefni sjálft)

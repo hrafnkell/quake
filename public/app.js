@@ -15,7 +15,7 @@ const RAMPS = {
 };
 
 const state = {
-  region: 'reykjanes',
+  region: null, // sjálfgefið svæði kemur frá þjóni
   preset: '48h',
   from: null, // ms, aðeins fyrir 'custom'
   to: null,
@@ -26,6 +26,7 @@ const state = {
 };
 
 let regions = [];
+let defaultRegion = 'island';
 let places = [];
 let quakes = [];
 let markers = [];
@@ -122,7 +123,7 @@ function readUrl() {
 
 function writeUrl() {
   const p = new URLSearchParams();
-  if (state.region !== 'reykjanes') p.set('region', state.region);
+  if (state.region !== defaultRegion) p.set('region', state.region);
   if (state.preset !== '48h') p.set('range', state.preset);
   if (state.preset === 'custom') {
     if (state.from) p.set('from', isoLocal(state.from).slice(0, 16));
@@ -271,9 +272,16 @@ function initMap() {
   legendControl.addTo(map);
 }
 
+const ICELAND = { lat: [63.2, 66.6], lon: [-24.6, -13.4] };
+
+// Svæði án ramma (allt landið) eru sýnd sem Ísland á kortinu
+const bounds = (r) => (r.lat[1] - r.lat[0] > 30 ? ICELAND : r);
+
 function fitRegion() {
   const r = regions.find((r) => r.id === state.region);
-  if (r) map.fitBounds([[r.lat[0], r.lon[0]], [r.lat[1], r.lon[1]]]);
+  if (!r) return;
+  const b = bounds(r);
+  map.fitBounds([[b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]]);
 }
 
 function renderMap(list, win) {
@@ -424,7 +432,12 @@ function clearBrush() {
 // --- 3D ---
 
 function render3d(list, win) {
-  const r = regions.find((r) => r.id === state.region);
+  const region = regions.find((r) => r.id === state.region);
+  let r = bounds(region);
+  if (r === ICELAND && list.length) {
+    const pad = (a) => [Math.min(...a) - 0.1, Math.max(...a) + 0.1];
+    r = { lat: pad(list.map((q) => q.lat)), lon: pad(list.map((q) => q.lon)) };
+  }
   const latMid = (r.lat[0] + r.lat[1]) / 2;
   const kmX = (r.lon[1] - r.lon[0]) * 111.32 * Math.cos((latMid * Math.PI) / 180);
   const kmY = (r.lat[1] - r.lat[0]) * 111.32;
@@ -575,7 +588,8 @@ async function init() {
   const data = await (await fetch('/api/regions')).json();
   regions = data.regions;
   places = data.places;
-  if (!regions.some((r) => r.id === state.region)) state.region = 'reykjanes';
+  defaultRegion = data.defaultRegion;
+  if (!regions.some((r) => r.id === state.region)) state.region = defaultRegion;
   $('#region').innerHTML = regions.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
   syncControls();
   bindControls();

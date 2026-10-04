@@ -10,7 +10,7 @@ export type QuakeFilter = {
   maxMag: number;
 };
 
-const COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace';
+const COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace, raw';
 export const MAX_ROWS = 50_000;
 
 export class QuakeStore {
@@ -36,6 +36,8 @@ export class QuakeStore {
       );
       CREATE INDEX IF NOT EXISTS quakes_time ON quakes(time);
     `);
+    const cols = this.db.query<{ name: string }, []>('PRAGMA table_info(quakes)').all().map((c) => c.name);
+    if (!cols.includes('raw')) this.db.exec('ALTER TABLE quakes ADD COLUMN raw TEXT');
   }
 
   // Veðurstofan endurmetur skjálfta (staðsetning/stærð breytist lítillega), svo sami
@@ -46,14 +48,14 @@ export class QuakeStore {
       WHERE time BETWEEN ?1 - 3 AND ?1 + 3 AND abs(lat - ?2) < 0.05 AND abs(lon - ?3) < 0.1
       ORDER BY abs(time - ?1) LIMIT 1`);
     const insert = this.db.query(`
-      INSERT INTO quakes (time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, first_seen, updated_at)
-      VALUES ($time, $lat, $lon, $depth, $mag, $quality, $distKm, $direction, $refPlace, $now, $now)`);
+      INSERT INTO quakes (time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, raw, first_seen, updated_at)
+      VALUES ($time, $lat, $lon, $depth, $mag, $quality, $distKm, $direction, $refPlace, $raw, $now, $now)`);
     const update = this.db.query(`
       UPDATE quakes SET time = $time, lat = $lat, lon = $lon, depth = $depth, mag = $mag, quality = $quality,
-        dist_km = $distKm, direction = $direction, ref_place = $refPlace, updated_at = $now
+        dist_km = $distKm, direction = $direction, ref_place = $refPlace, raw = $raw, updated_at = $now
       WHERE id = $id`);
 
-    const fields = ['time', 'lat', 'lon', 'depth', 'mag', 'quality', 'distKm', 'direction', 'refPlace'] as const;
+    const fields = ['time', 'lat', 'lon', 'depth', 'mag', 'quality', 'distKm', 'direction', 'refPlace', 'raw'] as const;
     let inserted = 0, updated = 0;
     const now = Math.floor(Date.now() / 1000);
 

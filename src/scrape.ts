@@ -8,6 +8,7 @@ export type Quake = {
   distKm: number | null;
   direction: string | null;
   refPlace: string | null;
+  raw: string; // allir reitir eins og vedur.is gefur þá, sem JSON
 };
 
 const URL = 'https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar';
@@ -26,6 +27,9 @@ const num = (s: string | undefined) => {
   const v = Number(s.replace(',', '.'));
   return Number.isFinite(v) ? v : null;
 };
+
+// 'a' er aldur skjálftans í dögum og breytist við hverja sókn, svo honum er sleppt
+const rest = ({ a, ...f }: Record<string, string>) => f;
 
 // "10-1" -> 9, "4" -> 4
 const evalInt = (s: string) => s.split('-').map(Number).reduce((a, b) => a - b);
@@ -51,6 +55,7 @@ export function parseFeed(html: string): Quake[] {
       distKm: num(f.dL),
       direction: f.dD?.trim() || null,
       refPlace: f.dR?.trim() || null,
+      raw: JSON.stringify({ ...rest(f), t: d[1] }),
     });
   }
   return out;

@@ -1,7 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 import { QuakeStore } from './db';
-import { PLACES, REGIONS } from './regions';
+import { DEFAULT_REGION, PLACES, REGIONS } from './regions';
 import { fetchFeed } from './scrape';
 
 const PORT = Number(process.env.PORT ?? 3000);
@@ -59,7 +59,7 @@ function numParam(url: URL, key: string, fallback: number) {
 }
 
 function quakes(req: Request, url: URL) {
-  const region = REGIONS.find((r) => r.id === (url.searchParams.get('region') ?? 'reykjanes'));
+  const region = REGIONS.find((r) => r.id === (url.searchParams.get('region') ?? DEFAULT_REGION));
   if (!region) return json(req, { error: 'Óþekkt svæði' }, 400);
 
   // Tímar í ms frá viðmóti, geymdir í sekúndum
@@ -100,7 +100,7 @@ const server = Bun.serve({
       case '/api/quakes':
         return quakes(req, url);
       case '/api/regions':
-        return json(req, { regions: REGIONS, places: PLACES });
+        return json(req, { regions: REGIONS, places: PLACES, defaultRegion: DEFAULT_REGION });
       case '/api/status':
         return json(req, { ...status, pollSeconds: POLL_SECONDS, ...store.stats() });
       default:
