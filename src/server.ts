@@ -83,12 +83,28 @@ function quakes(req: Request, url: URL) {
   });
 }
 
-async function staticFile(path: string) {
-  const file = normalize(join(PUBLIC_DIR, path === '/' ? 'index.html' : path));
+// Útgáfunúmer (hash af innihaldi) á app.js og style.css í index.html. Cloudflare lætur vafra
+// geyma .js/.css í 4 klst óháð Cache-Control frá okkur, svo ný slóð við hverja breytingu
+// tryggir að uppfærslur skili sér strax og leyfir langa geymslu á skránum sjálfum.
+async function buildIndex() {
+  let html = await Bun.file(join(PUBLIC_DIR, 'index.html')).text();
+  for (const asset of ['app.js', 'style.css']) {
+    const hash = Bun.hash(await Bun.file(join(PUBLIC_DIR, asset)).arrayBuffer()).toString(36);
+    html = html.replace(`"${asset}"`, `"${asset}?v=${hash}"`);
+  }
+  return html;
+}
+const indexHtml = await buildIndex();
+
+async function staticFile(path: string, versioned: boolean) {
+  if (path === '/' || path === '/index.html') {
+    return new Response(indexHtml, { headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-cache' } });
+  }
+  const file = normalize(join(PUBLIC_DIR, path));
   if (!file.startsWith(PUBLIC_DIR + '/')) return new Response('Not found', { status: 404 });
   const f = Bun.file(file);
   if (!(await f.exists())) return new Response('Not found', { status: 404 });
-  return new Response(f, { headers: { 'Cache-Control': 'no-cache' } });
+  return new Response(f, { headers: { 'Cache-Control': versioned ? 'public, max-age=31536000, immutable' : 'no-cache' } });
 }
 
 const server = Bun.serve({
@@ -104,7 +120,7 @@ const server = Bun.serve({
       case '/api/status':
         return json(req, { ...status, pollSeconds: POLL_SECONDS, ...store.stats() });
       default:
-        return staticFile(decodeURIComponent(url.pathname));
+        return staticFile(decodeURIComponent(url.pathname), url.searchParams.has('v'));
     }
   },
   error(e) {
