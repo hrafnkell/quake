@@ -431,12 +431,47 @@ function clearBrush() {
 
 // --- 3D ---
 
+// Strandlína og jöklar (Natural Earth 1:10m) til að átta sig í 3D sýn
+let outline = null;
+
+function loadOutline() {
+  fetch('iceland.json')
+    .then((r) => r.json())
+    .then((d) => {
+      outline = d;
+      if (state.view === '3d') render3d(visibleQuakes(), timeWindow());
+    })
+    .catch(() => {});
+}
+
+// Línur á yfirborði (dýpt 0). Punktar utan rammans eru felldir burt en nágrannar
+// punkta innan hans haldnir svo línan nái að brún; Plotly klippir afganginn við ásana.
+function outlineTrace(rings, r, color, width) {
+  const inside = (p) => p && p[0] >= r.lon[0] && p[0] <= r.lon[1] && p[1] >= r.lat[0] && p[1] <= r.lat[1];
+  const x = [], y = [];
+  const gap = () => x.length && x[x.length - 1] !== null && (x.push(null), y.push(null));
+  for (const ring of rings) {
+    ring.forEach((p, i) => {
+      if (inside(p) || inside(ring[i - 1]) || inside(ring[i + 1])) {
+        x.push(p[0]);
+        y.push(p[1]);
+      } else gap();
+    });
+    gap();
+  }
+  return {
+    type: 'scatter3d', mode: 'lines', x, y, z: x.map((v) => (v === null ? null : 0)),
+    line: { color, width }, hoverinfo: 'skip', showlegend: false, connectgaps: false,
+  };
+}
+
 function render3d(list, win) {
   const region = regions.find((r) => r.id === state.region);
   let r = bounds(region);
   if (r === ICELAND && list.length) {
-    const pad = (a) => [Math.min(...a) - 0.1, Math.max(...a) + 0.1];
-    r = { lat: pad(list.map((q) => q.lat)), lon: pad(list.map((q) => q.lon)) };
+    // Allt landið ásamt skjálftum utan við strönd
+    const pad = (a, [lo, hi]) => [Math.min(lo, ...a.map((v) => v - 0.1)), Math.max(hi, ...a.map((v) => v + 0.1))];
+    r = { lat: pad(list.map((q) => q.lat), ICELAND.lat), lon: pad(list.map((q) => q.lon), ICELAND.lon) };
   }
   const latMid = (r.lat[0] + r.lat[1]) / 2;
   const kmX = (r.lon[1] - r.lon[0]) * 111.32 * Math.cos((latMid * Math.PI) / 180);
@@ -462,8 +497,12 @@ function render3d(list, win) {
     },
   };
   const inRegion = places.filter((p) => p.lat > r.lat[0] && p.lat < r.lat[1] && p.lon > r.lon[0] && p.lon < r.lon[1]);
-  Plotly.react('plot3d', [trace], {
+  const mapLines = outline
+    ? [outlineTrace(outline.glaciers, r, css('--glacier'), 2), outlineTrace(outline.coast, r, css('--ink-2'), 3)]
+    : [];
+  Plotly.react('plot3d', [...mapLines, trace], {
     margin: { l: 0, r: 0, t: 0, b: 0 },
+    showlegend: false,
     paper_bgcolor: 'transparent',
     font: plotFont(),
     uirevision: state.region,
@@ -595,6 +634,7 @@ async function init() {
   bindControls();
   fitRegion();
   setView(state.view);
+  loadOutline();
   await loadQuakes();
   setInterval(tick, STATUS_EVERY);
 }

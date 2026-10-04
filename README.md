@@ -8,6 +8,7 @@ geymir þau í SQLite og birtir á korti, tímalínu, í 3D og í töflu.
 - `src/db.ts`: SQLite geymsla (`bun:sqlite`), sameinar endurmetna skjálfta
 - `src/regions.ts`: svæði (rammar) og örnefni fyrir 3D sýn
 - `public/`: viðmót (Leaflet + Plotly frá CDN, engin bygging)
+- `public/iceland.json`: strandlína og jöklar fyrir 3D sýn, úr [Natural Earth](https://www.naturalearthdata.com/) 1:10m (public domain)
 
 vedur.is sýnir aðeins u.þ.b. síðustu 48 klst, svo saga safnast upp frá því þjónninn fer í gang.
 Allt landið er geymt; svæði eru bara sía.

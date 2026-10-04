@@ -9,6 +9,7 @@
   --ok: #2e8540;
   --bad: #c62828;
   --bar: #b9b4aa;
+  --glacier: #7fb0dc;
   --radius: 10px;
   color-scheme: light;
 }
@@ -25,6 +26,7 @@
     --ok: #5cb86c;
     --bad: #ef6b6b;
     --bar: #55534d;
+    --glacier: #4f7ea8;
     color-scheme: dark;
   }
 }
