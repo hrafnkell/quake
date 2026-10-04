@@ -27,23 +27,23 @@ Stillingar með umhverfisbreytum: `PORT` (3000), `HOST` (127.0.0.1), `DB_PATH` (
 - `GET /api/regions`
 - `GET /api/status`: síðasta sókn, villur, fjöldi í grunni
 
-## Uppsetning á VM
+## Uppsetning
 
-Einu sinni, á VM:
-
-```bash
-curl -fsSL https://bun.sh/install | sudo BUN_INSTALL=/usr/local bash
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin quake
-sudo mkdir -p /opt/quake
-```
-
-Af þinni vél (afritar kóða, `quake.service` þarf að setja upp í fyrsta skipti):
+Keyrir sem systemd **notendaþjónusta** á `elmer` í `~/srv/quake`, á porti 3060 (aðeins 127.0.0.1).
 
 ```bash
-deploy/deploy.sh notandi@vm
-ssh notandi@vm 'sudo cp /opt/quake/deploy/quake.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl enable --now quake'
+deploy/deploy.sh                 # sjálfgefið: elmer srv/quake
+deploy/deploy.sh annar-hysill srv/quake
 ```
 
-Þjónninn hlustar aðeins á 127.0.0.1, settu reverse proxy fyrir framan, t.d. Caddy (`deploy/Caddyfile`) sem sér um HTTPS.
+Skriftan afritar kóðann með rsync, setur `deploy/quake.service` í `~/.config/systemd/user/`,
+og (endur)ræsir þjónustuna. `data/` (gagnagrunnurinn) og `.env` eru aldrei yfirskrifuð.
+Stillingar má yfirskrifa í `~/srv/quake/.env` (t.d. `POLL_SECONDS=120`).
 
-Annálar: `journalctl -u quake -f`. Afrit af gögnum: `sqlite3 /var/lib/quake/quakes.db ".backup quakes-backup.db"`.
+Krefst Bun í `~/.bun/bin/bun` og að linger sé virkt (`loginctl enable-linger`) svo þjónustan
+keyri án innskráningar. Fyrir opinbera slóð, bæta `deploy/Caddyfile` við `/etc/caddy/Caddyfile`.
+
+```bash
+ssh elmer journalctl --user -u quake -f
+ssh elmer 'sqlite3 ~/srv/quake/data/quakes.db ".backup quakes-backup.db"'
+```

@@ -1,5 +1,5 @@
-# Skiptu út fyrir lénið þitt; Caddy sér sjálft um HTTPS skírteini
-quake.example.is {
-	encode gzip
-	reverse_proxy 127.0.0.1:3000
+# Bæta við /etc/caddy/Caddyfile á elmer og keyra: sudo systemctl reload caddy
+quake.hlekkir.is {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:3060
 }

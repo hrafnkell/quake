@@ -1,31 +1,19 @@
+# systemd notendaþjónusta, sett upp í ~/.config/systemd/user/ af deploy/deploy.sh
 [Unit]
-Description=Jarðskjálftakort (quake)
+Description=Quake (jarðskjálftakort)
 After=network-online.target
-Wants=network-online.target
 
 [Service]
-Type=simple
-User=quake
-Group=quake
-WorkingDirectory=/opt/quake
-ExecStart=/usr/local/bin/bun run src/server.ts
+WorkingDirectory=%h/srv/quake
 Environment=HOST=127.0.0.1
-Environment=PORT=3000
-Environment=DB_PATH=/var/lib/quake/quakes.db
+Environment=PORT=3060
+Environment=DB_PATH=%h/srv/quake/data/quakes.db
 Environment=POLL_SECONDS=300
-# Kerfisnotandinn hefur ekkert heimasvæði til að skrifa skyndiminni í
-Environment=BUN_RUNTIME_TRANSPILER_CACHE_PATH=0
-# Býr til /var/lib/quake í eigu quake notandans
-StateDirectory=quake
+# Valfrjálst: yfirskrifa stillingar án þess að breyta þessari skrá
+EnvironmentFile=-%h/srv/quake/.env
+ExecStart=%h/.bun/bin/bun run src/server.ts
 Restart=always
-RestartSec=5
-
-# Hersla
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-PrivateDevices=true
+RestartSec=3
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
