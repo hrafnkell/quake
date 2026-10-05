@@ -36,6 +36,7 @@ const state = {
   view: 'map',
   layer: 'dots', // 'dots' | 'density' (þéttleiki í sexhyrningum)
   brush: null, // [ms, ms] valið á tímalínu
+  event: null, // valinn atburður (id), sjá applyEvent; hreinsast þegar svæði/tímabil nær ekki lengur yfir hann
   heatMetric: 'energy', // hitakort: 'energy' | 'count'
   heatFrom: null, // hitakort: ár, sjálfgefið fyrsta ár í grunni
   heatTo: null,
@@ -158,6 +159,7 @@ function readUrl() {
   state.minMag = num('min');
   state.maxMag = num('max');
   if (['map', '3d', 'table', 'heat'].includes(p.get('view'))) state.view = p.get('view');
+  state.event = p.get('event') || null; // staðfest þegar atburðir hafa verið sóttir
   if (p.get('metric') === 'count') state.heatMetric = 'count';
   const years = /^(\d{4})-(\d{4})$/.exec(p.get('years') ?? '');
   if (years) [state.heatFrom, state.heatTo] = [+years[1], +years[2]];
@@ -174,6 +176,7 @@ function writeUrl() {
   }
   if (state.minMag != null) p.set('min', state.minMag);
   if (state.maxMag != null) p.set('max', state.maxMag);
+  if (state.event) p.set('event', state.event);
   if (state.view !== 'map') p.set('view', state.view);
   if (state.layer !== 'dots') p.set('layer', state.layer);
   if (state.view === 'heat') {
@@ -337,9 +340,52 @@ function applyEvent(id) {
   state.from = e.startMs - before * 86400e3;
   state.to = Math.min(e.startMs + after * 86400e3, Date.now());
   state.brush = null;
+  state.event = e.id;
   if (state.view === 'table') setView('map');
   fitRegion();
   filtersChanged();
+}
+
+const eventRegion = (e) => (regions.some((r) => r.id === e.region) ? e.region : defaultRegion);
+
+// Valinn atburður meðan hann er enn á skjánum: sama svæði og upphafið innan tímabilsins. Smá tilfærsla
+// á tímalínu eða stærðarsía heldur honum; annað svæði eða tímabil án upphafsins hreinsar valið.
+function selectedEvent() {
+  const e = events.find((x) => x.id === state.event);
+  if (!e || state.region !== eventRegion(e)) return null;
+  const win = timeWindow();
+  return e.startMs >= win[0] && e.startMs <= win[1] ? e : null;
+}
+
+function renderEventCard() {
+  const card = $('#event-card');
+  const e = selectedEvent();
+  card.hidden = !e;
+  if (!e) return;
+  const glyph = e.kind === 'eruption' ? '▲' : e.kind === 'intrusion' ? '◆' : '✶';
+  const ongoing = e.kind === 'eruption' && e.endMs > e.startMs + 86400e3;
+  const when = e.endMs > e.startMs + 3600e3
+    ? `${fmtDateTime.format(e.startMs)} – ${fmtDate.format(e.endMs)}${ongoing ? ` (${Math.round((e.endMs - e.startMs) / 86400e3)} dagar)` : ''}`
+    : fmtDateTime.format(e.startMs);
+  const win = timeWindow();
+  const days = (ms) => Math.round(ms / 86400e3);
+  card.innerHTML = `
+    <span class="glyph" aria-hidden="true">${glyph}</span>
+    <div class="body">
+      <div class="kind">${KIND_LABEL[e.kind]} · ${esc(regions.find((r) => r.id === eventRegion(e))?.name ?? '')}</div>
+      <div class="name">${esc(e.name)}</div>
+      <div class="when">${when}</div>
+      ${e.note ? `<div class="note">${esc(e.note)}</div>` : ''}
+      <div class="span">Tímabilið sýnir ${days(e.startMs - win[0])} daga aðdraganda og ${days(win[1] - e.startMs)} daga eftir upphaf</div>
+    </div>
+    <button type="button" class="close" id="event-clear" aria-label="Hreinsa atburð" title="Hreinsa atburð">✕</button>`;
+  $('#event-clear').onclick = () => {
+    state.event = null;
+    syncControls();
+    writeUrl();
+    renderEvents(timeWindow());
+    Plotly.relayout('timeline', timelineShapes());
+  };
 }
 
 let eventLayer;
@@ -350,7 +396,8 @@ function renderEvents(win) {
   for (const e of eventsIn(win)) {
     const glyph = e.kind === 'eruption' ? '▲' : e.kind === 'intrusion' ? '◆' : '✶';
     L.marker([e.lat, e.lon], {
-      icon: L.divIcon({ className: 'event-icon', html: `<span>${glyph}</span>`, iconSize: [20, 20], iconAnchor: [10, 10] }),
+      icon: L.divIcon({ className: `event-icon${e.id === state.event ? ' selected' : ''}`, html: `<span>${glyph}</span>`, iconSize: [20, 20], iconAnchor: [10, 10] }),
+      zIndexOffset: e.id === state.event ? 1000 : 0,
       interactive: true,
       keyboard: false,
     }).bindTooltip(eventTitle(e), { className: 'quake-tip', direction: 'top', offset: [0, -10] }).addTo(eventLayer);
@@ -369,7 +416,8 @@ function eventShapes(win) {
     }
     annotations.push({
       x: x0, xref: 'x', y: 1, yref: 'paper', yanchor: 'bottom', xanchor: 'left', yshift: 2, showarrow: false,
-      text: esc(e.name), font: { color, size: 11 }, hovertext: eventTitle(e).replace(/<[^>]+>/g, ' '),
+      text: e.id === state.event ? `<b>${esc(e.name)}</b>` : esc(e.name), font: { color, size: e.id === state.event ? 12 : 11 },
+      hovertext: eventTitle(e).replace(/<[^>]+>/g, ' '),
     });
   }
   return { shapes, annotations };
@@ -1833,6 +1881,9 @@ function setView(view) {
 }
 
 function syncControls() {
+  if (state.event && !selectedEvent()) state.event = null;
+  $('#events').value = state.event ?? '';
+  renderEventCard();
   $('#region').value = state.region;
   for (const b of $$('#presets button')) b.setAttribute('aria-pressed', b.dataset.preset === state.preset);
   $('#custom-range').hidden = state.preset !== 'custom';
@@ -1859,8 +1910,13 @@ function bindControls() {
     filtersChanged();
   };
   $('#events').onchange = (e) => {
-    applyEvent(e.target.value);
-    e.target.value = '';
+    if (e.target.value) applyEvent(e.target.value);
+    else {
+      state.event = null;
+      syncControls();
+      writeUrl();
+      render();
+    }
   };
   $('#presets').onclick = (e) => {
     const b = e.target.closest('[data-preset]');
