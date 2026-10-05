@@ -11,9 +11,10 @@ geymir þau í SQLite og birtir á korti, tímalínu, í 3D og í töflu.
 - `src/regions.ts`: svæði (rammar) og örnefni fyrir 3D sýn
 - `src/events.ts`: eldgos og stórir atburðir frá 1991, handskráðir; merki á tímalínu og korti og bókamerki
   („Atburðir“) sem stilla svæði og tímabil á aðdragandann. Bættu við eða lagaðu að vild
-- `public/`: viðmót (Leaflet + Plotly frá CDN, engin bygging). Afspilun (▶ undir korti/3D, bilslá) birtir skjálfta
-  tímabilsins í tímaröð á 30 s (stillanlegt); á kortinu er þá teiknað á canvas í stað Leaflet-merkja svo ár með
-  tugþúsundum skjálfta renni mjúklega
+- `public/`: viðmót (Leaflet + Plotly frá CDN, engin bygging). Kortið teiknar skjálfta á canvas (tugþúsundir á
+  ~100 ms), annaðhvort sem punkta eða þéttleika í sexhyrningum (lógaritmískur kvarði). Afspilun (▶ undir korti/3D,
+  bilslá) birtir skjálfta tímabilsins í tímaröð á 30 s (stillanlegt). Festur skjálfti M ≥ 3 býður upp á
+  eftirskjálftagreiningu: Omori-tíðnifall (p), Gutenberg–Richter (b, Mc) og stærsta eftirskjálfta (Båth)
 - `public/iceland.json`: strandlína og jöklar fyrir 3D sýn, úr [Natural Earth](https://www.naturalearthdata.com/) 1:10m (public domain)
 
 vedur.is sýnir aðeins u.þ.b. síðustu 48 klst, svo saga safnast upp frá því þjónninn fer í gang;

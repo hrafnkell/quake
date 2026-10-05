@@ -182,6 +182,19 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); 
 .event-icon { color: var(--event); font-size: 18px; line-height: 1; text-shadow: 0 0 3px var(--surface), 0 0 6px var(--surface); text-align: center; }
 .event-icon span { display: block; transform: translateY(-2px); }
 
+.analysis-card { margin-top: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 8px 8px; }
+.analysis-card[hidden] { display: none; }
+.analysis-card .close { margin-left: auto; border: 0; background: transparent; color: var(--ink-2); cursor: pointer; font-size: 1rem; }
+.analysis-card p { margin: 4px 8px 0; }
+#aftershocks-plot { height: 300px; }
+.quake-tip a { color: var(--accent); text-decoration: none; font-weight: 600; }
+
+/* Punktar / þéttleiki */
+.layer-toggle { background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; display: flex; }
+.layer-toggle button { font: inherit; font-size: 0.8rem; border: 0; background: transparent; color: var(--ink-2); padding: 4px 10px; cursor: pointer; }
+.layer-toggle button + button { border-left: 1px solid var(--line); }
+.layer-toggle button[aria-pressed=true] { background: var(--ink); color: var(--surface); }
+
 .timeline-card { margin-top: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 8px 4px; }
 .card-head { display: flex; gap: 12px; align-items: baseline; padding: 0 8px; flex-wrap: wrap; }
 .hint { font-size: 0.8rem; color: var(--ink-3); }

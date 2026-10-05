@@ -13,6 +13,12 @@ const RAMPS = {
   light: ['#7f1d1d', '#c2410c', '#f59e0b', '#fcd9a0'],
   dark: ['#fff4c2', '#fbbf24', '#f97316', '#8a3a12'],
 };
+// Þéttleiki: fáir = ljóst, margir = dökkt (ljóst þema), öfugt í dökku
+const DENSITY_RAMPS = {
+  light: ['#fde68a', '#f59e0b', '#c2410c', '#7f1d1d'],
+  dark: ['#5b2a06', '#d97706', '#fde68a', '#fff7cc'],
+};
+const HEX = 11; // px frá miðju í horn
 
 const state = {
   region: null, // sjálfgefið svæði kemur frá þjóni
@@ -22,6 +28,7 @@ const state = {
   minMag: null,
   maxMag: null,
   view: 'map',
+  layer: 'dots', // 'dots' | 'density' (þéttleiki í sexhyrningum)
   brush: null, // [ms, ms] valið á tímalínu
 };
 
@@ -80,8 +87,8 @@ function hexToRgb(h) {
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
 }
 
-function rampColor(t) {
-  const stops = RAMPS[dark() ? 'dark' : 'light'].map(hexToRgb);
+function rampColor(t, ramps = RAMPS) {
+  const stops = ramps[dark() ? 'dark' : 'light'].map(hexToRgb);
   const x = clamp(t, 0, 1) * (stops.length - 1);
   const i = Math.min(Math.floor(x), stops.length - 2);
   const f = x - i;
@@ -126,6 +133,7 @@ function readUrl() {
   state.minMag = num('min');
   state.maxMag = num('max');
   if (['map', '3d', 'table'].includes(p.get('view'))) state.view = p.get('view');
+  if (p.get('layer') === 'density') state.layer = 'density';
 }
 
 function writeUrl() {
@@ -139,6 +147,7 @@ function writeUrl() {
   if (state.minMag != null) p.set('min', state.minMag);
   if (state.maxMag != null) p.set('max', state.maxMag);
   if (state.view !== 'map') p.set('view', state.view);
+  if (state.layer !== 'dots') p.set('layer', state.layer);
   const qs = p.toString();
   history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
 }
@@ -248,6 +257,11 @@ function render() {
   renderTimeline(win);
   renderBrushChip();
   updatePlaybackUi();
+  if (aftershockMain) {
+    // Nýir hlutir eftir endurhleðslu: finna sama skjálfta aftur, annars loka
+    const m = quakes.find((q) => q.t === aftershockMain.t && q.lat === aftershockMain.lat && q.lon === aftershockMain.lon);
+    m ? ((aftershockMain = m), renderAftershocks()) : closeAftershocks();
+  }
 }
 
 // ---------- Atburðir: eldgos og stórir skjálftar ----------
@@ -342,10 +356,15 @@ function renderStats(list) {
   ].join('');
 }
 
-function tooltipHtml(q) {
+function tooltipHtml(q, pinned = false) {
   return `<b>M ${fmt1(q.mag)}</b> <span class="muted">· dýpt ${fmt1(q.depth)} km</span><br>
     ${fmtDateTime.format(q.t)} <span class="muted">(${ago(q.t)})</span><br>
-    ${esc(place(q))}${q.q != null ? `<br><span class="muted">Gæði ${fmt1(q.q)}</span>` : ''}`;
+    ${esc(place(q))}${q.q != null ? `<br><span class="muted">Gæði ${fmt1(q.q)}</span>` : ''}${
+    pinned && q.mag >= AFTERSHOCK_MIN_MAG ? `<br><a href="#" class="aftershocks-link">Eftirskjálftar →</a>` : ''}`;
+}
+
+function binTooltipHtml(b) {
+  return `<b>${b.n.toLocaleString('is-IS')} skjálftar</b><br><span class="muted">stærsti M ${fmt1(b.maxMag)}</span>`;
 }
 
 // --- Kort ---
@@ -381,6 +400,32 @@ function initMap() {
   legendControl = L.control({ position: 'bottomright' });
   legendControl.onAdd = () => L.DomUtil.create('div', 'legend');
   legendControl.addTo(map);
+
+  const toggle = L.control({ position: 'topleft' });
+  toggle.onAdd = () => {
+    const div = L.DomUtil.create('div', 'layer-toggle');
+    div.innerHTML = `<button type="button" data-layer="dots">Punktar</button><button type="button" data-layer="density">Þéttleiki</button>`;
+    L.DomEvent.disableClickPropagation(div);
+    div.onclick = (e) => {
+      const b = e.target.closest('[data-layer]');
+      if (b) setLayer(b.dataset.layer);
+    };
+    return div;
+  };
+  toggle.addTo(map);
+  syncLayerToggle();
+}
+
+function syncLayerToggle() {
+  for (const b of $$('.layer-toggle [data-layer]')) b.setAttribute('aria-pressed', b.dataset.layer === state.layer);
+}
+
+function setLayer(layer) {
+  state.layer = layer;
+  syncLayerToggle();
+  writeUrl();
+  quakeLayer.setMode(layer);
+  renderLegend(timeWindow());
 }
 
 const ICELAND = { lat: [63.2, 66.6], lon: [-24.6, -13.4] };
@@ -480,6 +525,68 @@ const QuakeCanvas = L.Layer.extend({
     ctx.globalAlpha = 1;
   },
 
+  setMode(mode) {
+    this._mode = mode;
+    this.unpin();
+    if (player.active) this.redrawAll();
+    else this.drawStatic();
+  },
+  // Sexhyrningar í skjáhnitum (oddur upp): punktur -> ásahnit (q, r), námundað
+  _hexKey(x, y) {
+    const qf = ((Math.sqrt(3) / 3) * x - y / 3) / HEX, rf = ((2 / 3) * y) / HEX;
+    let q = Math.round(qf), r = Math.round(rf), s = Math.round(-qf - rf);
+    const dq = Math.abs(q - qf), dr = Math.abs(r - rf), ds = Math.abs(s - (-qf - rf));
+    if (dq > dr && dq > ds) q = -r - s;
+    else if (dr > ds) r = -q - s;
+    return [q, r];
+  },
+  _hexCenter(q, r) {
+    return [HEX * Math.sqrt(3) * (q + r / 2), HEX * 1.5 * r];
+  },
+  // Þéttleiki: fjöldi í hverjum sexhyrningi, litur á lógaritmískum kvarða svo hrinur drekki ekki allt
+  _drawDensity(ctx, quakes) {
+    const bins = new Map();
+    for (const q of quakes) {
+      const [x, y] = this._point(q);
+      if (!this._visible(x, y, HEX)) continue;
+      const [hq, hr] = this._hexKey(x, y);
+      const key = hq * 65536 + hr;
+      let b = bins.get(key);
+      if (!b) {
+        const [cx, cy] = this._hexCenter(hq, hr);
+        bins.set(key, (b = { n: 0, maxMag: -Infinity, x: cx, y: cy }));
+      }
+      b.n++;
+      if (q.mag > b.maxMag) b.maxMag = q.mag;
+    }
+    let max = 1;
+    for (const b of bins.values()) if (b.n > max) max = b.n;
+    this._bins = bins;
+    this._binMax = max;
+    const lut = Array.from({ length: 33 }, (_, i) => `rgb(${rampColor(i / 32, DENSITY_RAMPS).join(',')})`);
+    ctx.globalAlpha = 0.85;
+    for (const b of bins.values()) {
+      ctx.fillStyle = lut[Math.round((Math.log1p(b.n) / Math.log1p(max)) * 32)];
+      ctx.beginPath();
+      for (let k = 0; k < 6; k++) {
+        const a = (Math.PI / 180) * (60 * k - 30);
+        const px = b.x + (HEX - 0.5) * Math.cos(a), py = b.y + (HEX - 0.5) * Math.sin(a);
+        k ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  },
+  _hitBin(x, y) {
+    if (!this._bins) return null;
+    const [q, r] = this._hexKey(x, y);
+    return this._bins.get(q * 65536 + r) ?? null;
+  },
+  densityMax() {
+    return this._mode === 'density' ? this._binMax ?? 0 : 0;
+  },
+
   // --- Kyrrstæð sýn ---
   setStatic(list, win) {
     this._list = [...list].sort(byMagDesc);
@@ -498,7 +605,9 @@ const QuakeCanvas = L.Layer.extend({
     this._drawPinned();
     const ctx = this._ctx(this._base);
     const grid = (this._grid = new Map());
+    this._bins = null;
     if (!this._win) return;
+    if (this._mode === 'density') return this._drawDensity(ctx, this._list);
     const [a, b] = this._win;
     const span = Math.max(b - a, 1);
     const ramp = makeRamp();
@@ -531,18 +640,34 @@ const QuakeCanvas = L.Layer.extend({
   _onMove(e) {
     if (player.active) return;
     const p = e.layerPoint;
-    const hit = this._hit(p.x - this._origin.x, p.y - this._origin.y);
+    const x = p.x - this._origin.x, y = p.y - this._origin.y;
+    if (this._mode === 'density') {
+      const bin = this._hitBin(x, y);
+      if (bin !== this._hover?.bin) {
+        this._clearHover();
+        if (bin) {
+          this._tip = L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -HEX] }).setLatLng(e.latlng).setContent(binTooltipHtml(bin));
+          this._map.openTooltip(this._tip);
+          this._hover = { bin };
+        }
+      } else if (bin && this._tip) this._tip.setLatLng(e.latlng);
+      return;
+    }
+    const hit = this._hit(x, y);
     if (hit?.q !== this._hover?.q) hit ? this.showTip(hit.q) : this._clearHover();
     this._map.getContainer().style.cursor = hit ? 'pointer' : '';
   },
   _onClick(e) {
-    if (player.active) return;
+    if (player.active || this._mode === 'density') return;
+    // Smellur á tengil í festri ábendingu á ekki að losa hana
+    if (e.originalEvent?.target?.closest?.('.leaflet-tooltip')) return;
     const p = e.layerPoint;
     const hit = this._hit(p.x - this._origin.x, p.y - this._origin.y);
     hit ? this.pin(hit.q) : this.unpin();
   },
-  _tooltip(q) {
-    return L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -radiusFor(q.mag)] }).setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q));
+  _tooltip(q, pinned = false) {
+    return L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -radiusFor(q.mag)], interactive: pinned })
+      .setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q, pinned));
   },
   // Ábending við músina; hverfur þegar músin fer af skjálftanum
   showTip(q) {
@@ -562,7 +687,7 @@ const QuakeCanvas = L.Layer.extend({
   pin(q) {
     this.unpin();
     this._pinned = q;
-    this._pinTip = this._tooltip(q);
+    this._pinTip = this._tooltip(q, true);
     this._map.openTooltip(this._pinTip);
     this._clearHover();
     this._drawPinned();
@@ -606,9 +731,18 @@ const QuakeCanvas = L.Layer.extend({
     const span = Math.max(player.range[1] - player.range[0], 1);
     const ramp = makeRamp();
     const ctx = this._ctx(this._base);
-    for (const q of player.byMag) {
-      const shownAt = player.shown.get(q);
-      if (shownAt != null && now - shownAt >= POP_MS) this._drawAt(ctx, q, ramp, span);
+    if (this._mode === 'density') {
+      const settled = [];
+      for (const q of player.byMag) {
+        const shownAt = player.shown.get(q);
+        if (shownAt != null && now - shownAt >= POP_MS) settled.push(q);
+      }
+      this._drawDensity(ctx, settled);
+    } else {
+      for (const q of player.byMag) {
+        const shownAt = player.shown.get(q);
+        if (shownAt != null && now - shownAt >= POP_MS) this._drawAt(ctx, q, ramp, span);
+      }
     }
     this._lastBase = now;
     this._pending = this._pending.filter((q) => now - player.shown.get(q) < POP_MS);
@@ -634,6 +768,16 @@ const QuakeCanvas = L.Layer.extend({
 });
 
 function renderLegend(win) {
+  if (state.layer === 'density') {
+    const stops = DENSITY_RAMPS[dark() ? 'dark' : 'light'];
+    const max = quakeLayer.densityMax();
+    legendControl.getContainer().innerHTML = `
+      <div>Skjálftar í reit</div>
+      <div class="ramp" style="background:linear-gradient(to right, ${stops.join(',')})"></div>
+      <div class="ends"><span>1</span><span>${Math.max(1, Math.round(Math.sqrt(max))).toLocaleString('is-IS')}</span><span>${max.toLocaleString('is-IS')}</span></div>
+      <div class="ends" style="margin-top:4px"><span>Lógaritmískur kvarði</span></div>`;
+    return;
+  }
   const stops = RAMPS[dark() ? 'dark' : 'light'];
   const sizes = [1, 2, 3, 4].map((m) => {
     const d = 2 * radiusFor(m);
@@ -1162,6 +1306,133 @@ function bindPlayback() {
   });
 }
 
+// ---------- Eftirskjálftar ----------
+// Fyrir fastan skjálfta (M ≥ 3): skjálftar á eftir honum innan radíuss sem vex með stærð, út sótt tímabil.
+// Omori: tíðni n(t) ∝ t^-p, p metið með aðhvarfi í log-log á lógaritmískum tímabilum.
+// Gutenberg–Richter: log10 N(≥M) = a − bM, b metið með hámarkslíkindum ofan heildarmarks Mc
+// (algengasta stærðin). Båth: stærsti eftirskjálfti er að jafnaði ~1,2 stærðarstigum minni.
+
+const AFTERSHOCK_MIN_MAG = 3;
+let aftershockMain = null;
+
+// Radíus í km: um 3 km fyrir M3, 5 fyrir M4, 12 fyrir M5, 34 fyrir M6
+const aftershockRadiusKm = (mag) => 2 + 10 ** (0.5 * mag - 1.5);
+
+const distKm = (a, b) => {
+  const dy = (b.lat - a.lat) * 111.32;
+  const dx = (b.lon - a.lon) * 111.32 * Math.cos(((a.lat + b.lat) / 2) * (Math.PI / 180));
+  return Math.hypot(dx, dy);
+};
+
+// Línulegt aðhvarf y = a + b·x
+function fitLine(xs, ys) {
+  const n = xs.length;
+  const mx = xs.reduce((s, v) => s + v, 0) / n, my = ys.reduce((s, v) => s + v, 0) / n;
+  let sxx = 0, sxy = 0;
+  for (let i = 0; i < n; i++) {
+    sxx += (xs[i] - mx) ** 2;
+    sxy += (xs[i] - mx) * (ys[i] - my);
+  }
+  const b = sxx ? sxy / sxx : 0;
+  return { a: my - b * mx, b };
+}
+
+function analyzeAftershocks(main) {
+  const r = aftershockRadiusKm(main.mag);
+  const end = Math.min(timeWindow()[1], Date.now());
+  const list = quakes.filter((q) => q !== main && q.t > main.t && q.t <= end && distKm(main, q) <= r).sort((a, b) => a.t - b.t);
+  const hours = (end - main.t) / 3600e3;
+
+  // Omori: lógaritmísk tímabil frá 10 mín, 6 á hverja tíund
+  const edges = [];
+  for (let e = Math.log10(1 / 6); e <= Math.log10(Math.max(hours, 1)) + 1e-9; e += 1 / 6) edges.push(10 ** e);
+  if (edges[edges.length - 1] < hours) edges.push(hours);
+  const rate = [];
+  for (let i = 0; i + 1 < edges.length; i++) {
+    const n = list.filter((q) => { const h = (q.t - main.t) / 3600e3; return h >= edges[i] && h < edges[i + 1]; }).length;
+    if (n > 0) rate.push({ t: Math.sqrt(edges[i] * edges[i + 1]), n: n / (edges[i + 1] - edges[i]) });
+  }
+  const omori = rate.length >= 3 ? fitLine(rate.map((p) => Math.log10(p.t)), rate.map((p) => Math.log10(p.n))) : null;
+
+  // Gutenberg–Richter
+  const mags = list.map((q) => Math.round(q.mag * 10) / 10);
+  const hist = new Map();
+  for (const m of mags) hist.set(m, (hist.get(m) ?? 0) + 1);
+  let mc = null, best = 0;
+  for (const [m, n] of hist) if (n > best || (n === best && m < mc)) { best = n; mc = m; }
+  const above = mags.filter((m) => m >= mc);
+  const bValue = above.length >= 10 ? Math.log10(Math.E) / (above.reduce((s, m) => s + m, 0) / above.length - (mc - 0.05)) : null;
+  const steps = [];
+  if (mags.length) {
+    const min = Math.min(...mags), max = Math.max(...mags);
+    for (let m = min; m <= max + 1e-9; m += 0.1) {
+      const mm = Math.round(m * 10) / 10;
+      steps.push({ m: mm, n: mags.filter((x) => x >= mm - 1e-9).length });
+    }
+  }
+  const largest = list.reduce((m, q) => (!m || q.mag > m.mag ? q : m), null);
+  return { list, r, hours, rate, omori, mc, bValue, steps, largest };
+}
+
+function openAftershocks(main) {
+  aftershockMain = main;
+  renderAftershocks();
+  $('#aftershocks').hidden = false;
+  $('#aftershocks').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function closeAftershocks() {
+  aftershockMain = null;
+  $('#aftershocks').hidden = true;
+}
+
+function renderAftershocks() {
+  const main = aftershockMain;
+  if (!main) return;
+  const a = analyzeAftershocks(main);
+  $('#aftershocks-title').textContent = `Eftirskjálftar · M ${fmt1(main.mag)} ${place(main)} ${fmtDateTime.format(main.t)}`;
+  const parts = [`${a.list.length.toLocaleString('is-IS')} innan ${fmt1(a.r)} km á ${spanLabel(a.hours * HOUR)}`];
+  if (a.largest) parts.push(`stærsti M ${fmt1(a.largest.mag)} (Δ ${fmt1(main.mag - a.largest.mag)}, Båth ≈ 1,2)`);
+  if (a.omori) parts.push(`Omori p = ${fmt1(-a.omori.b)}`);
+  if (a.bValue) parts.push(`b = ${fmt1(a.bValue)} (Mc ${fmt1(a.mc)})`);
+  $('#aftershocks-summary').textContent = parts.join(' · ');
+  $('#aftershocks-note').textContent = a.list.length < 20
+    ? 'Fáir eftirskjálftar í sóttum gögnum; stækkaðu tímabilið eða svæðið til að fá betra mat.'
+    : a.hours < 24 * 7 ? 'Sótt tímabil nær skemur en viku eftir skjálftann; lengra tímabil gefur betra mat á p.' : '';
+
+  const grid = css('--line');
+  const accent = css('--accent');
+  const axis = { gridcolor: grid, zerolinecolor: grid, linecolor: grid };
+  const traces = [
+    { type: 'scatter', mode: 'markers', x: a.rate.map((p) => p.t), y: a.rate.map((p) => p.n), name: 'Tíðni', marker: { color: css('--bar'), size: 8 },
+      hovertemplate: '%{x:.2f} klst eftir: %{y:.2f} á klst<extra></extra>' },
+    { type: 'scatter', mode: 'markers', x: a.steps.map((s) => s.m), y: a.steps.map((s) => s.n), name: 'N(≥M)', xaxis: 'x2', yaxis: 'y2', marker: { color: css('--bar'), size: 7 },
+      hovertemplate: '%{y} skjálftar ≥ M %{x:.1f}<extra></extra>' },
+  ];
+  if (a.omori && a.rate.length) {
+    const xs = [a.rate[0].t, a.rate[a.rate.length - 1].t];
+    traces.push({ type: 'scatter', mode: 'lines', x: xs, y: xs.map((t) => 10 ** (a.omori.a + a.omori.b * Math.log10(t))), name: `p = ${fmt1(-a.omori.b)}`, line: { color: accent, width: 2 }, hoverinfo: 'skip' });
+  }
+  if (a.bValue && a.steps.length) {
+    const nMc = a.steps.find((s) => s.m >= a.mc - 1e-9)?.n ?? 1;
+    const xs = [a.mc, a.steps[a.steps.length - 1].m];
+    traces.push({ type: 'scatter', mode: 'lines', x: xs, y: xs.map((m) => nMc * 10 ** (-a.bValue * (m - a.mc))), name: `b = ${fmt1(a.bValue)}`, xaxis: 'x2', yaxis: 'y2', line: { color: accent, width: 2 }, hoverinfo: 'skip' });
+  }
+  Plotly.react('aftershocks-plot', traces, {
+    margin: { l: 56, r: 12, t: 28, b: 40 },
+    paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: plotFont(), showlegend: false,
+    hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
+    annotations: [
+      { text: 'Tíðni eftirskjálfta (Omori)', xref: 'paper', yref: 'paper', x: 0.22, y: 1.08, showarrow: false, font: { size: 12 } },
+      { text: 'Stærðardreifing (Gutenberg–Richter)', xref: 'paper', yref: 'paper', x: 0.78, y: 1.08, showarrow: false, font: { size: 12 } },
+    ],
+    xaxis: { ...axis, type: 'log', domain: [0, 0.45], title: { text: 'Klst eftir skjálftann' } },
+    yaxis: { ...axis, type: 'log', title: { text: 'Skjálftar á klst' } },
+    xaxis2: { ...axis, domain: [0.55, 1], title: { text: 'Stærð M' } },
+    yaxis2: { ...axis, type: 'log', anchor: 'x2', title: { text: 'Fjöldi ≥ M' } },
+  }, { displaylogo: false, responsive: true, modeBarButtons: [['toImage']] });
+}
+
 // ---------- Viðmót ----------
 
 function setView(view) {
@@ -1237,6 +1508,13 @@ function bindControls() {
   };
   $('#brush-clear').onclick = clearBrush;
   bindPlayback();
+  document.addEventListener('click', (e) => {
+    const a = e.target.closest('.aftershocks-link');
+    if (!a) return;
+    e.preventDefault();
+    if (quakeLayer._pinned) openAftershocks(quakeLayer._pinned);
+  });
+  $('#aftershocks-close').onclick = closeAftershocks;
   $('#auto').onchange = () => {
     if ($('#auto').checked) tick();
     else checkStatus();
@@ -1262,6 +1540,7 @@ async function init() {
   bindControls();
   fitRegion();
   setView(state.view);
+  quakeLayer.setMode(state.layer);
   loadOutline();
   await loadQuakes();
   setInterval(tick, STATUS_EVERY);
