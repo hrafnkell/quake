@@ -34,6 +34,14 @@ const PLACE = ['distKm', 'direction', 'refPlace'] as const;
 const REV_COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace, raw';
 const COLUMNS = REV_COLUMNS.replace(', raw', ', region, event_id AS eventId, raw');
 const QUERY_COLUMNS = COLUMNS.replace(', raw', '');
+// Sjálfvirk (óyfirfarin) stærð M4+ sem er orðin eldri en 30 daga verður ekki yfirfarin héðan af og er
+// oft röng: í gömlu SIL-skránni eru t.d. „M9,1“ 2003 og tugir M5,5–7,3 sumarið 2005, flestir á sjálfgefnu
+// 5,2 km dýpi. Slíkir skjálftar eru sýndir og taldir, en stærðin ekki tekin trúanleg (kort, tölur, hitakort).
+// Ekki er hægt að fella þá út: raunverulegi Ölfusskjálftinn 2008 er t.d. aðeins sjálfvirkur M6,1 í skránni.
+export const SUSPECT = { mag: 4, ageDays: 30 };
+export const suspectSql = (cutoff: string) => `(coalesce(quality, 0) < 90 AND mag >= ${SUSPECT.mag} AND time < ${cutoff})`;
+export const suspectCutoff = (now = Date.now()) => Math.floor(now / 1000) - SUSPECT.ageDays * 86400;
+
 // Hámark í einni fyrirspurn; sé meira á tímabilinu eru stærstu skjálftarnir sýndir (sjá query)
 export const MAX_ROWS = 100_000;
 
@@ -45,6 +53,9 @@ const NEAR = { time: 3, lat: 0.05, lon: 0.1 };
 // en aðeins meðal raða sem hurfu úr straumnum í þessari sókn.
 const REVISED = { time: 60, lat: 0.3, lon: 0.6 };
 
+type Stats = { total: number; withdrawn: number; first: number | null; lastChange: number | null };
+const STATS_TTL = 10 * 60e3;
+
 type Row = Quake & { id: number; withdrawnAt: number | null; lastSeen: number | null; updatedAt: number };
 const ROW_COLUMNS = `id, withdrawn_at AS withdrawnAt, last_seen AS lastSeen, updated_at AS updatedAt, ${COLUMNS}`;
 // Útgáfa gagnaskipunar (PRAGMA user_version): 2 = revisions geymir aðeins eldri útgáfur, ekki þá núverandi
@@ -52,6 +63,8 @@ const SCHEMA_VERSION = 2;
 
 export class QuakeStore {
   db: Database;
+  // Kallað eftir hverja upsert með tímum (unix s) raða sem breyttust, birtust eða hurfu; sjá heat.ts
+  onChange?: (times: number[]) => void;
 
   constructor(path: string) {
     this.db = new Database(path, { create: true });
@@ -132,6 +145,7 @@ export class QuakeStore {
   upsert(quakes: Quake[], now = Math.floor(Date.now() / 1000), opts: UpsertOptions = {}) {
     const counts = { inserted: 0, updated: 0, withdrawn: 0 };
     if (quakes.length === 0) return counts;
+    const changedTimes: number[] = [];
     const feed = (opts.source ?? 'feed') === 'feed';
 
     const byEvent = this.db.query<Row, [string]>(`SELECT ${ROW_COLUMNS} FROM quakes WHERE event_id = ?1`);
@@ -197,8 +211,10 @@ export class QuakeStore {
           supersede(hit);
           update.run({ ...params(q), $now: now, $id: hit.id });
           counts.updated++;
+          changedTimes.push(hit.time, q.time);
         } else if (feed) {
           touch.run({ $now: now, $id: hit.id });
+          if (hit.withdrawnAt != null) changedTimes.push(hit.time);
         }
       }
 
@@ -217,23 +233,30 @@ export class QuakeStore {
           supersede(r);
           update.run({ ...params(q), $now: now, $id: r.id });
           counts.updated++;
+          changedTimes.push(r.time, q.time);
         } else {
           insert.get({ ...params(q), $now: now });
           counts.inserted++;
+          changedTimes.push(q.time);
         }
       }
       for (const r of gone) {
         if (!canWithdraw(r)) continue;
         withdraw.run({ $now: now, $id: r.id });
         counts.withdrawn++;
+        changedTimes.push(r.time);
       }
     })();
+    if (changedTimes.length) {
+      this.statsMemo = null;
+      this.onChange?.(changedTimes);
+    }
     return counts;
   }
 
   // Skjálftar í tímaröð. Séu fleiri en MAX_ROWS á tímabilinu eru þeir stærstu teknir, svo stórar
   // hrinur séu sýndar í heild (minnstu skjálftarnir falla út) frekar en að elsti hlutinn vanti.
-  query(f: QuakeFilter): { rows: Quake[]; total: number } {
+  query(f: QuakeFilter, now = Date.now()): { rows: Quake[]; total: number } {
     const where = `
       WHERE withdrawn_at IS NULL
         AND time BETWEEN $from AND $to
@@ -247,7 +270,9 @@ export class QuakeStore {
     const total = this.db.query<{ n: number }, Record<string, number>>(`SELECT count(*) AS n FROM quakes ${where}`).get(params)!.n;
     const order = total > MAX_ROWS ? 'mag DESC, time DESC' : 'time';
     // raw er ekki sent í viðmótið og að sleppa því styttir stórar fyrirspurnir um þriðjung
-    const rows = this.db.query<Quake, Record<string, number>>(`SELECT ${QUERY_COLUMNS} FROM quakes ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`).all(params);
+    const rows = this.db.query<Quake, Record<string, number>>(
+      `SELECT ${QUERY_COLUMNS}, ${suspectSql(String(suspectCutoff(now)))} AS suspect FROM quakes ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`,
+    ).all(params);
     if (total > MAX_ROWS) rows.sort((a, b) => a.time - b.time);
     return { rows, total };
   }
@@ -263,11 +288,24 @@ export class QuakeStore {
       ORDER BY cur, seenAt, ord`).all(q.time, q.lat, q.lon);
   }
 
-  stats() {
-    return this.db.query<{ total: number; withdrawn: number; first: number | null; lastChange: number | null }, []>(`
+  // Talning yfir alla raðir tekur ~0,5 s með 1,2 milljón skjálftum og /api/status kallar á þetta úr hverjum
+  // opnum flipa á mínútu fresti, svo niðurstaðan er geymd þar til gögn breytast. Önnur ferli (bakfylling)
+  // breyta grunninum án þess að þetta ferli viti, svo hún er líka endurnýjuð á STATS_TTL fresti.
+  private statsMemo: { at: number; value: Stats } | null = null;
+
+  stats(): Stats {
+    if (this.statsMemo && Date.now() - this.statsMemo.at < STATS_TTL) return this.statsMemo.value;
+    const value = this.db.query<Stats, []>(`
       SELECT count(*) FILTER (WHERE withdrawn_at IS NULL) AS total,
              count(*) FILTER (WHERE withdrawn_at IS NOT NULL) AS withdrawn,
              min(time) AS first, max(updated_at) AS lastChange
       FROM quakes`).get()!;
+    this.statsMemo = { at: Date.now(), value };
+    return value;
+  }
+
+  // Elsti skjálfti, um vísi (hratt, ólíkt stats)
+  firstTime(): number | null {
+    return this.db.query<{ t: number | null }, []>('SELECT min(time) AS t FROM quakes').get()!.t;
   }
 }

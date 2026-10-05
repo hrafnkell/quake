@@ -7,10 +7,12 @@
 //
 // Óhætt að keyra aftur og meðan þjónninn keyrir (WAL). Skjálftar sem eru þegar í grunni úr straumnum
 // eru uppfærðir með yfirförnum gildum og fá auðkenni skrárinnar; fjarlægð/stefna/örnefni úr straumnum
-// er haldið. Ekkert er fellt út, því skráin getur vantað skjálfta sem straumurinn sýnir.
+// er haldið. Skjálftar sem straumurinn hefur sýnt eru ekki felldir út, því skráin getur vantað þá;
+// aðeins sjálfvirkar raðir úr skránni sjálfri sem eru horfnar úr henni.
 // Umhverfisbreytur: DB_PATH (data/quakes.db), CATALOG_SYSTEM (sil|seiscomp; sjálfgefið eftir dagsetningu).
 import { fetchCatalog, windows, type CatalogSystem } from './catalog';
 import { QuakeStore } from './db';
+import { HeatCache } from './heat';
 
 const DB_PATH = process.env.DB_PATH ?? 'data/quakes.db';
 const DEFAULT_CHUNK_DAYS = 7;
@@ -49,6 +51,8 @@ if (import.meta.main) {
   const forced = process.env.CATALOG_SYSTEM as CatalogSystem | undefined;
   if (forced && forced !== 'sil' && forced !== 'seiscomp') throw new Error('CATALOG_SYSTEM þarf að vera sil eða seiscomp');
   const store = new QuakeStore(DB_PATH);
+  // Hreinsar geymd hitakortsár sem bakfyllingin breytir (þjónninn reiknar þau aftur)
+  new HeatCache(store);
   const total = { fetched: 0, inserted: 0, updated: 0 };
   console.log(`Bakfylli ${iso(from)} – ${iso(to)} í ${DB_PATH}`);
   for (const c of windows(from, to, chunk, forced)) {

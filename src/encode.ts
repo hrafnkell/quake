@@ -16,6 +16,7 @@ export type Columns = {
   dir: number[]; // vísir í strings, -1 = vantar
   ref: number[];
   region: number[];
+  sus: number[]; // 1 = óyfirfarin stærð, líklega röng (sjá SUSPECT í db.ts)
   strings: string[];
 };
 
@@ -27,7 +28,7 @@ export function encodeColumns(rows: Quake[]): Columns {
     if (i == null) dict.set(s, (i = dict.size));
     return i;
   };
-  const c: Columns = { n: rows.length, t: [], lat: [], lon: [], depth: [], mag: [], q: [], dist: [], dir: [], ref: [], region: [], strings: [] };
+  const c: Columns = { n: rows.length, t: [], lat: [], lon: [], depth: [], mag: [], q: [], dist: [], dir: [], ref: [], region: [], sus: [], strings: [] };
   let prev = 0;
   for (const r of rows) {
     c.t.push(r.time - prev);
@@ -41,13 +42,14 @@ export function encodeColumns(rows: Quake[]): Columns {
     c.dir.push(idx(r.direction));
     c.ref.push(idx(r.refPlace));
     c.region.push(idx(r.region));
+    c.sus.push(r.suspect ? 1 : 0);
   }
   c.strings = [...dict.keys()];
   return c;
 }
 
 // Sama snið og viðmótið notar (public/app.js, decodeColumns); hér til að prófa hringferðina
-export type ClientQuake = { t: number; lat: number; lon: number; depth: number; mag: number; q: number | null; dist: number | null; dir: string | null; ref: string | null; region: string | null };
+export type ClientQuake = { t: number; lat: number; lon: number; depth: number; mag: number; q: number | null; dist: number | null; dir: string | null; ref: string | null; region: string | null; sus: boolean };
 
 export function decodeColumns(c: Columns): ClientQuake[] {
   const out: ClientQuake[] = new Array(c.n);
@@ -58,6 +60,7 @@ export function decodeColumns(c: Columns): ClientQuake[] {
     out[i] = {
       t: t * 1000, lat: c.lat[i] / 1000, lon: c.lon[i] / 1000, depth: c.depth[i] / 10, mag: c.mag[i] / 10, q: c.q[i],
       dist: c.dist[i] < 0 ? null : c.dist[i] / 10, dir: str(c.dir[i]), ref: str(c.ref[i]), region: str(c.region[i]),
+      sus: c.sus[i] === 1,
     };
   }
   return out;
@@ -66,5 +69,5 @@ export function decodeColumns(c: Columns): ClientQuake[] {
 // Raðasnið, eins og API skilaði áður (?format=rows)
 export const toRows = (rows: Quake[]): ClientQuake[] => rows.map((q) => ({
   t: q.time * 1000, lat: q.lat, lon: q.lon, depth: q.depth, mag: q.mag,
-  q: q.quality, dist: q.distKm, dir: q.direction, ref: q.refPlace, region: q.region ?? null,
+  q: q.quality, dist: q.distKm, dir: q.direction, ref: q.refPlace, region: q.region ?? null, sus: !!q.suspect,
 }));

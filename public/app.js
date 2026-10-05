@@ -36,6 +36,9 @@ const state = {
   view: 'map',
   layer: 'dots', // 'dots' | 'density' (þéttleiki í sexhyrningum)
   brush: null, // [ms, ms] valið á tímalínu
+  heatMetric: 'energy', // hitakort: 'energy' | 'count'
+  heatFrom: null, // hitakort: ár, sjálfgefið fyrsta ár í grunni
+  heatTo: null,
 };
 
 let regions = [];
@@ -121,6 +124,11 @@ function timeWindow() {
 // Stærð eftir orku: þvermál tvöfaldast fyrir hverja stærðareiningu. Rétt orkukvörðun
 // (×32 á einingu) myndi láta M4 gleypa kortið, svo þetta er málamiðlun.
 const radiusFor = (mag) => clamp(2.5 * 2 ** mag, 2.5, 48);
+// Óyfirfarin sjálfvirk stærð M4+ eldri en 30 daga er oft röng (t.d. „M9,1“ 2003); þjónninn merkir hana
+// (sus, sjá SUSPECT í db.ts) og hún er sýnd sem M4 og aldrei talin stærsti skjálftinn
+const SUSPECT_MAG = 4;
+const shownMag = (q) => (q.sus ? SUSPECT_MAG : q.mag);
+const trusted = (q) => !q.sus;
 
 // 'at' er viðmiðunartími fyrir aldur (afspilun); sjálfgefið endi gluggans / núna
 function style(q, win, at) {
@@ -129,7 +137,7 @@ function style(q, win, at) {
   return {
     fill: `rgb(${r},${g},${b})`,
     opacity: 0.92 - 0.45 * clamp(t, 0, 1),
-    radius: radiusFor(q.mag),
+    radius: radiusFor(shownMag(q)),
     recent: (at ?? Date.now()) - q.t < HOUR,
   };
 }
@@ -149,7 +157,10 @@ function readUrl() {
   const num = (k) => (p.has(k) && p.get(k) !== '' && Number.isFinite(+p.get(k)) ? +p.get(k) : null);
   state.minMag = num('min');
   state.maxMag = num('max');
-  if (['map', '3d', 'table'].includes(p.get('view'))) state.view = p.get('view');
+  if (['map', '3d', 'table', 'heat'].includes(p.get('view'))) state.view = p.get('view');
+  if (p.get('metric') === 'count') state.heatMetric = 'count';
+  const years = /^(\d{4})-(\d{4})$/.exec(p.get('years') ?? '');
+  if (years) [state.heatFrom, state.heatTo] = [+years[1], +years[2]];
   if (p.get('layer') === 'density') state.layer = 'density';
 }
 
@@ -165,6 +176,10 @@ function writeUrl() {
   if (state.maxMag != null) p.set('max', state.maxMag);
   if (state.view !== 'map') p.set('view', state.view);
   if (state.layer !== 'dots') p.set('layer', state.layer);
+  if (state.view === 'heat') {
+    if (state.heatMetric !== 'energy') p.set('metric', state.heatMetric);
+    if (state.heatFrom != null) p.set('years', `${state.heatFrom}-${state.heatTo}`);
+  }
   const qs = p.toString();
   history.replaceState(null, '', qs ? `?${qs}` : location.pathname);
 }
@@ -181,6 +196,7 @@ function decodeColumns(c) {
     out[i] = {
       t: t * 1000, lat: c.lat[i] / 1000, lon: c.lon[i] / 1000, depth: c.depth[i] / 10, mag: c.mag[i] / 10, q: c.q[i],
       dist: c.dist[i] < 0 ? null : c.dist[i] / 10, dir: str(c.dir[i]), ref: str(c.ref[i]), region: str(c.region[i]),
+      sus: c.sus?.[i] === 1,
     };
   }
   return out;
@@ -242,6 +258,14 @@ async function tick() {
   if (document.hidden || !$('#auto').checked || player.active) return;
   const s = await checkStatus();
   if (!s) return;
+  if (state.view === 'heat') {
+    // Aðeins yfirstandandi ár breytist að jafnaði; liðin ár eru geymd á þjóni
+    if (s.version !== heat.statusVersion && state.heatTo === heat.years.at(-1)?.year) {
+      heat.statusVersion = s.version;
+      loadHeatYears().then(() => loadHeat({ quiet: true })).catch(() => {});
+    }
+    return;
+  }
   // Sækja aftur ef ný gögn eru komin eða ef glugginn hreyfist (t.d. "síðustu 48 klst")
   const sliding = state.preset !== 'custom' && Date.now() - lastFetch > 5 * 60e3;
   if (s.version !== dataVersion || sliding) loadQuakes({ quiet: true });
@@ -355,7 +379,7 @@ function timelineShapes(win = timeWindow()) {
 }
 
 function renderStats(list) {
-  const biggest = list.reduce((m, q) => (!m || q.mag > m.mag ? q : m), null);
+  const biggest = list.reduce((m, q) => (trusted(q) && (!m || q.mag > m.mag) ? q : m), null);
   const latest = list[list.length - 1];
   const strong = list.filter((q) => q.mag >= 3).length;
   const tile = (k, v, d = '') => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
@@ -376,7 +400,8 @@ function tooltipHtml(q, pinned = false) {
   return `<b>M ${fmt1(q.mag)}</b> <span class="muted">· dýpt ${fmt1(q.depth)} km</span><br>
     ${fmtDateTime.format(q.t)} <span class="muted">(${ago(q.t)})</span><br>
     ${esc(place(q))}${q.q != null ? `<br><span class="muted">Gæði ${fmt1(q.q)}</span>` : ''}${
-    pinned && q.mag >= AFTERSHOCK_MIN_MAG ? `<br><a href="#" class="aftershocks-link">Eftirskjálftar →</a>` : ''}`;
+    q.sus ? `<br><span class="muted">Óyfirfarin sjálfvirk stærð, líklega röng. Sýnd sem M${SUSPECT_MAG}.</span>` : ''}${
+    pinned && trusted(q) && q.mag >= AFTERSHOCK_MIN_MAG ? `<br><a href="#" class="aftershocks-link">Eftirskjálftar →</a>` : ''}`;
 }
 
 function binTooltipHtml(b) {
@@ -393,7 +418,17 @@ function initMap() {
   // Skrunhjól þysjar aðeins eftir að smellt er á kortið, annars skrunar síðan
   map.on('click focus', () => map.scrollWheelZoom.enable());
   map.on('mouseout blur', () => map.scrollWheelZoom.disable());
-  baseLayers = {
+  baseLayers = makeBaseLayers();
+  baseLayers.Kort.addTo(map);
+  L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
+  L.control.scale({ imperial: false }).addTo(map);
+  quakeLayer = new QuakeCanvas().addTo(map);
+  initMapControls();
+}
+
+// Ný eintök fyrir hvert kort: Leaflet-lag getur aðeins verið á einu korti í einu
+function makeBaseLayers() {
+  return {
     Kort: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       className: 'osm-tiles',
@@ -408,11 +443,9 @@ function initMap() {
       attribution: 'Tiles &copy; Esri',
     }),
   };
-  baseLayers.Kort.addTo(map);
-  L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
-  L.control.scale({ imperial: false }).addTo(map);
-  quakeLayer = new QuakeCanvas().addTo(map);
+}
 
+function initMapControls() {
   legendControl = L.control({ position: 'bottomright' });
   legendControl.onAdd = () => L.DomUtil.create('div', 'legend');
   legendControl.addTo(map);
@@ -449,11 +482,11 @@ const ICELAND = { lat: [63.2, 66.6], lon: [-24.6, -13.4] };
 // Svæði án ramma (allt landið) eru sýnd sem Ísland á kortinu
 const bounds = (r) => (r.lat[1] - r.lat[0] > 30 ? ICELAND : r);
 
-function fitRegion() {
+function fitRegion(m = map) {
   const r = regions.find((r) => r.id === state.region);
   if (!r) return;
   const b = bounds(r);
-  map.fitBounds([[b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]]);
+  m.fitBounds([[b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]]);
 }
 
 function renderMap(list, win) {
@@ -519,17 +552,22 @@ const QuakeCanvas = L.Layer.extend({
   },
   // Einn skjálfti: fylltur hringur, útlína ef hann er innan klukkustundar frá viðmiðunartíma,
   // og í „poppinu“ (p frá 0 til 1) yfirstærð sem skreppur saman ásamt hring sem þenst út og dofnar
-  _circle(ctx, x, y, r, color, alpha, recent, p = 1) {
+  // hollow: óyfirfarin stærð (sus), teiknuð sem brotinn hringur án fyllingar svo hún líti ekki út fyrir að vera raunveruleg
+  _circle(ctx, x, y, r, color, alpha, recent, p = 1, hollow = false) {
     const ease = 1 - (1 - p) ** 3;
     ctx.beginPath();
     ctx.arc(x, y, r * (1 + 1.4 * (1 - ease)), 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = alpha;
-    ctx.fill();
-    ctx.lineWidth = recent ? 2 : 1;
+    if (!hollow) {
+      ctx.fillStyle = color;
+      ctx.globalAlpha = alpha;
+      ctx.fill();
+    }
+    ctx.lineWidth = recent || hollow ? 2 : 1;
     ctx.strokeStyle = recent ? this._ink : color;
     ctx.globalAlpha = recent ? 0.9 : Math.min(1, alpha + 0.1);
+    if (hollow) ctx.setLineDash([4, 3]);
     ctx.stroke();
+    if (hollow) ctx.setLineDash([]);
     if (p < 1) {
       ctx.beginPath();
       ctx.arc(x, y, r * (1 + 2.5 * ease) + 2, 0, Math.PI * 2);
@@ -573,7 +611,7 @@ const QuakeCanvas = L.Layer.extend({
         bins.set(key, (b = { n: 0, maxMag: -Infinity, x: cx, y: cy }));
       }
       b.n++;
-      if (q.mag > b.maxMag) b.maxMag = q.mag;
+      if (shownMag(q) > b.maxMag) b.maxMag = shownMag(q);
     }
     let max = 1;
     for (const b of bins.values()) if (b.n > max) max = b.n;
@@ -630,10 +668,10 @@ const QuakeCanvas = L.Layer.extend({
     const now = Date.now();
     for (const q of this._list) {
       const [x, y] = this._point(q);
-      const r = radiusFor(q.mag);
+      const r = radiusFor(shownMag(q));
       if (!this._visible(x, y, r)) continue;
       const age = clamp((b - q.t) / span, 0, 1);
-      this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, now - q.t < HOUR);
+      this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, now - q.t < HOUR, 1, q.sus);
       const key = Math.floor(x / CELL) * 65536 + Math.floor(y / CELL);
       let cell = grid.get(key);
       if (!cell) grid.set(key, (cell = []));
@@ -682,7 +720,7 @@ const QuakeCanvas = L.Layer.extend({
     hit ? this.pin(hit.q) : this.unpin();
   },
   _tooltip(q, pinned = false) {
-    return L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -radiusFor(q.mag)], interactive: pinned })
+    return L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -radiusFor(shownMag(q))], interactive: pinned })
       .setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q, pinned));
   },
   // Ábending við músina; hverfur þegar músin fer af skjálftanum
@@ -719,7 +757,7 @@ const QuakeCanvas = L.Layer.extend({
     const q = this._pinned;
     if (!q || player.active) return;
     const [x, y] = this._point(q);
-    const r = radiusFor(q.mag);
+    const r = radiusFor(shownMag(q));
     ctx.beginPath();
     ctx.arc(x, y, r + 5, 0, Math.PI * 2);
     ctx.lineWidth = 3;
@@ -766,10 +804,10 @@ const QuakeCanvas = L.Layer.extend({
   },
   _drawAt(ctx, q, ramp, span, p = 1) {
     const [x, y] = this._point(q);
-    const r = radiusFor(q.mag);
+    const r = radiusFor(shownMag(q));
     if (!this._visible(x, y, r)) return;
     const age = clamp((player.t - q.t) / span, 0, 1);
-    this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, player.t - q.t < HOUR, p);
+    this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, player.t - q.t < HOUR, p, q.sus);
   },
   // Hver rammi: grunnlag með millibili sem vex með fjölda, topplag með öllu sem grunnlagið nær ekki enn til
   draw(now, fresh) {
@@ -804,7 +842,8 @@ function renderLegend(win) {
     <div class="ramp" style="background:linear-gradient(to right, ${stops.join(',')})"></div>
     <div class="ends"><span>nýr</span><span>${spanLabel(win[1] - win[0])}</span></div>
     <div class="sizes">${sizes.join('')}</div>
-    <div class="ends" style="margin-top:4px"><span>Útlína: síðasta klukkustund</span></div>`;
+    <div class="ends" style="margin-top:4px"><span>Útlína: síðasta klukkustund</span></div>${
+    quakes.some((q) => q.sus) ? '<div class="ends"><span>Brotinn hringur: óyfirfarin stærð, sýnd sem M4</span></div>' : ''}`;
 }
 
 function focusQuake(q) {
@@ -845,9 +884,9 @@ function renderTimeline(win) {
     type: 'scattergl',
     mode: 'markers',
     x,
-    y: quakes.map((q) => q.mag),
-    customdata: quakes.map((q) => [fmtDateTime.format(q.t), q.depth, place(q)]),
-    hovertemplate: '<b>M %{y:.1f}</b> · dýpt %{customdata[1]:.1f} km<br>%{customdata[0]}<br>%{customdata[2]}<extra></extra>',
+    y: quakes.map(shownMag), // grunsamleg stærð teygir annars ásinn upp í „M9“
+    customdata: quakes.map((q) => [fmtDateTime.format(q.t), q.depth, esc(place(q)), q.sus ? ` (skráð M ${fmt1(q.mag)}, óyfirfarin)` : '']),
+    hovertemplate: '<b>M %{y:.1f}</b>%{customdata[3]} · dýpt %{customdata[1]:.1f} km<br>%{customdata[0]}<br>%{customdata[2]}<extra></extra>',
     // Jafnstórir punktar; stærðin er á y-ásnum og misstórir punktar gera þétta tímalínu ólæsilega
     marker: {
       size: 5,
@@ -1390,7 +1429,7 @@ function analyzeAftershocks(main) {
       steps.push({ m: mm, n: mags.filter((x) => x >= mm - 1e-9).length });
     }
   }
-  const largest = list.reduce((m, q) => (!m || q.mag > m.mag ? q : m), null);
+  const largest = list.reduce((m, q) => (trusted(q) && (!m || q.mag > m.mag) ? q : m), null);
   return { list, r, hours, rate, omori, mc, bValue, steps, largest };
 }
 
@@ -1453,12 +1492,328 @@ function renderAftershocks() {
   }, { displaylogo: false, responsive: true, modeBarButtons: [['toImage']] });
 }
 
+// ---------- Hitakort ----------
+// Samanlögð orka eða fjöldi skjálfta í ~1 km reitum yfir heil ár, reiknað og geymt á þjóni (src/heat.ts).
+// Orka er sýnd sem jafngild stærð: einn skjálfti af þeirri stærð losar jafn mikla orku og allir í reitnum
+// saman (E ∝ 10^(1,5·M)), svo stórir skjálftar vega eins og þeir eiga að gera en þúsundir smárra telja líka.
+
+const HEAT_CELLS = { lat: 100, lon: 50 }; // reitir á gráðu, sama og CELLS_PER_DEG í heat.ts
+const HEAT_MIN_PX = 6; // reitir sameinaðir (2×2, 4×4…) þar til hver er a.m.k. þetta stór á skjá
+const HEAT_SPAN = 4; // orka: litaskalinn nær 4 stærðareiningar niður frá þeim mesta (milljónfaldur orkumunur)
+
+const heat = { map: null, layer: null, legend: null, cells: [], years: [], seq: 0, yearsSeq: 0, statusVersion: null, anchor: null };
+
+function decodeHeat(c) {
+  const out = new Array(c.n);
+  for (let i = 0; i < c.n; i++) {
+    out[i] = { y: c.y[i], x: c.x[i], n: c.count[i], e: 10 ** ((1.5 * c.meq[i]) / 100), mx: c.mx[i] / 10 };
+  }
+  return out;
+}
+
+const heatYearsLabel = () => (state.heatFrom === state.heatTo ? `${state.heatFrom}` : `${state.heatFrom}–${state.heatTo}`);
+
+function heatTooltipHtml(b, k) {
+  return `<b>${b.n.toLocaleString('is-IS')} ${b.n === 1 ? 'skjálfti' : 'skjálftar'}</b><br>
+    samanlögð orka ≈ M ${fmt1(Math.log10(b.e) / 1.5)}<br>
+    <span class="muted">stærsti M ${fmt1(b.mx)} · ${heatYearsLabel()} · reitur ~${k} km</span>`;
+}
+
+// Reitir teiknaðir á canvas í skjáhnitum og endurteiknaðir eftir hverja hreyfingu
+const HeatLayer = L.Layer.extend({
+  onAdd(map) {
+    this._map = map;
+    this._canvas = L.DomUtil.create('canvas', 'heat-canvas leaflet-zoom-hide');
+    map.getPanes().overlayPane.appendChild(this._canvas);
+    map.on('moveend zoomend resize', this._redraw, this);
+    map.on('mousemove', this._hover, this);
+    map.on('mouseout', this._unhover, this);
+    this._redraw();
+  },
+  onRemove(map) {
+    this._canvas.remove();
+    map.off('moveend zoomend resize', this._redraw, this);
+    map.off('mousemove', this._hover, this);
+    map.off('mouseout', this._unhover, this);
+  },
+  setData(cells, metric) {
+    this._cells = cells;
+    this._metric = metric;
+    this._redraw();
+  },
+  _redraw() {
+    const map = this._map;
+    if (!map) return;
+    const size = map.getSize();
+    const dpr = window.devicePixelRatio || 1;
+    const c = this._canvas;
+    c.width = size.x * dpr;
+    c.height = size.y * dpr;
+    c.style.width = `${size.x}px`;
+    c.style.height = `${size.y}px`;
+    L.DomUtil.setPosition(c, map.containerPointToLayerPoint([0, 0]));
+    const ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size.x, size.y);
+    if (!this._cells?.length) {
+      this._blocks = null;
+      renderHeatLegend(null);
+      return;
+    }
+
+    // Hversu margir reitir sameinast: hæð eins reits á skjá við miðju kortsins
+    const mid = map.getCenter();
+    const px = Math.abs(map.latLngToContainerPoint(mid).y - map.latLngToContainerPoint([mid.lat + 1 / HEAT_CELLS.lat, mid.lng]).y);
+    let k = 1;
+    while (px * k < HEAT_MIN_PX && k < 256) k *= 2;
+
+    // Fjöldi og orka leggjast saman, stærsti skjálfti er hámark
+    const blocks = new Map();
+    for (const cell of this._cells) {
+      const by = Math.floor(cell.y / k), bx = Math.floor(cell.x / k);
+      const key = by * 1e6 + bx;
+      let b = blocks.get(key);
+      if (!b) blocks.set(key, (b = { by, bx, n: 0, e: 0, mx: -Infinity }));
+      b.n += cell.n;
+      b.e += cell.e;
+      if (cell.mx > b.mx) b.mx = cell.mx;
+    }
+    const metric = this._metric;
+    const value = metric === 'count' ? (b) => Math.log10(b.n) : (b) => Math.log10(b.e) / 1.5;
+    let hi = -Infinity;
+    for (const b of blocks.values()) hi = Math.max(hi, value(b));
+    const lo = metric === 'count' ? 0 : hi - HEAT_SPAN;
+    const lut = Array.from({ length: 65 }, (_, i) => `rgb(${rampColor(i / 64, DENSITY_RAMPS).join(',')})`);
+
+    const view = map.getBounds().pad(0.05);
+    const [s, n, w, e] = [view.getSouth(), view.getNorth(), view.getWest(), view.getEast()];
+    const dLat = k / HEAT_CELLS.lat, dLon = k / HEAT_CELLS.lon;
+    for (const b of blocks.values()) {
+      const lat0 = b.by * dLat, lon0 = b.bx * dLon;
+      if (lat0 + dLat < s || lat0 > n || lon0 + dLon < w || lon0 > e) continue;
+      const p0 = map.latLngToContainerPoint([lat0 + dLat, lon0]);
+      const p1 = map.latLngToContainerPoint([lat0, lon0 + dLon]);
+      const t = clamp((value(b) - lo) / Math.max(hi - lo, 1e-9), 0, 1);
+      // Veikir reitir nær gegnsæir svo kortið sjáist og strjálir smáskjálftar þeki ekki allt
+      ctx.globalAlpha = 0.08 + 0.87 * t ** 0.7;
+      ctx.fillStyle = lut[Math.round(t * 64)];
+      ctx.fillRect(p0.x, p0.y, Math.max(p1.x - p0.x, 1), Math.max(p1.y - p0.y, 1));
+    }
+    ctx.globalAlpha = 1;
+    this._blocks = blocks;
+    this._k = k;
+    renderHeatLegend({ metric, lo, hi, k });
+    if (this._tipLatLng) this._hover({ latlng: this._tipLatLng });
+  },
+  _hover(e) {
+    if (!this._blocks) return;
+    const k = this._k;
+    const by = Math.floor((e.latlng.lat * HEAT_CELLS.lat) / k), bx = Math.floor((e.latlng.lng * HEAT_CELLS.lon) / k);
+    const b = this._blocks.get(by * 1e6 + bx);
+    if (!b) return this._unhover();
+    this._tipLatLng = e.latlng;
+    this._tip ??= L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -8] });
+    this._tip.setLatLng([(by + 1) * (k / HEAT_CELLS.lat), (bx + 0.5) * (k / HEAT_CELLS.lon)]).setContent(heatTooltipHtml(b, k));
+    this._map.openTooltip(this._tip);
+  },
+  _unhover() {
+    this._tipLatLng = null;
+    if (this._tip) this._map.closeTooltip(this._tip);
+  },
+});
+
+function renderHeatLegend(d) {
+  const el = heat.legend?.getContainer();
+  if (!el) return;
+  if (!d) {
+    el.innerHTML = '<div>Engir skjálftar á tímabilinu</div>';
+    return;
+  }
+  const stops = DENSITY_RAMPS[dark() ? 'dark' : 'light'];
+  const ends = d.metric === 'count'
+    ? ['1', Math.round(10 ** d.hi).toLocaleString('is-IS')]
+    : [`≤ M ${fmt1(d.lo)}`, `M ${fmt1(d.hi)}`];
+  el.innerHTML = `
+    <div>${d.metric === 'count' ? 'Fjöldi skjálfta í reit' : 'Samanlögð orka í reit'}</div>
+    <div class="ramp" style="background:linear-gradient(to right, ${stops.join(',')})"></div>
+    <div class="ends"><span>${ends[0]}</span><span>${ends[1]}</span></div>
+    <div class="ends" style="margin-top:4px"><span>${d.metric === 'count'
+      ? 'Lógaritmískur kvarði'
+      : 'Sem stærð eins skjálfta'} · reitir ~${d.k} km</span></div>`;
+}
+
+function initHeatMap() {
+  const m = (heat.map = L.map('heatmap', { zoomSnap: 0.25, scrollWheelZoom: false, zoomAnimation: false }));
+  m.on('click focus', () => m.scrollWheelZoom.enable());
+  m.on('mouseout blur', () => m.scrollWheelZoom.disable());
+  const base = makeBaseLayers();
+  base.Kort.addTo(m);
+  L.control.layers(base, null, { position: 'topright' }).addTo(m);
+  L.control.scale({ imperial: false }).addTo(m);
+  heat.layer = new HeatLayer().addTo(m);
+  heat.legend = L.control({ position: 'bottomright' });
+  heat.legend.onAdd = () => L.DomUtil.create('div', 'legend');
+  heat.legend.addTo(m);
+  fitRegion(m);
+}
+
+async function loadHeatYears() {
+  const seq = ++heat.yearsSeq;
+  const res = await fetch(`/api/heat/years?region=${encodeURIComponent(state.region)}`);
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? res.statusText);
+  const data = await res.json();
+  if (seq !== heat.yearsSeq) return false;
+  heat.years = data.years;
+  const first = heat.years[0].year, last = heat.years[heat.years.length - 1].year;
+  const options = heat.years.map((y) => `<option value="${y.year}">${y.year}</option>`).join('');
+  if ($('#heat-from').options.length !== heat.years.length) {
+    $('#heat-from').innerHTML = options;
+    $('#heat-to').innerHTML = options;
+  }
+  state.heatFrom = clamp(state.heatFrom ?? first, first, last);
+  state.heatTo = clamp(state.heatTo ?? last, first, last);
+  if (state.heatFrom > state.heatTo) [state.heatFrom, state.heatTo] = [state.heatTo, state.heatFrom];
+  syncHeatControls();
+  renderHeatYears();
+  return true;
+}
+
+async function loadHeat({ quiet = false } = {}) {
+  const seq = ++heat.seq;
+  if (!quiet) setStatus('Sæki hitakort…');
+  try {
+    const res = await fetch(`/api/heat?from=${state.heatFrom}&to=${state.heatTo}`);
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? res.statusText);
+    const data = await res.json();
+    if (seq !== heat.seq) return;
+    heat.cells = decodeHeat(data);
+    heat.layer.setData(heat.cells, state.heatMetric);
+    renderHeatSummary();
+    const s = await checkStatus();
+    if (s) heat.statusVersion = s.version;
+  } catch (e) {
+    if (seq === heat.seq) setStatus(`Villa: ${e.message}`, 'bad');
+  }
+}
+
+async function showHeat() {
+  if (!heat.map) initHeatMap();
+  heat.map.invalidateSize();
+  try {
+    if (await loadHeatYears()) await loadHeat();
+  } catch (e) {
+    setStatus(`Villa: ${e.message}`, 'bad');
+  }
+}
+
+function renderHeatSummary() {
+  const inRange = heat.years.filter((y) => y.year >= state.heatFrom && y.year <= state.heatTo);
+  const n = inRange.reduce((s, y) => s + y.n, 0);
+  const regionName = regions.find((r) => r.id === state.region)?.name ?? '';
+  $('#heat-summary').textContent = `${n.toLocaleString('is-IS')} skjálftar · ${regionName} · ${heatYearsLabel()}`;
+}
+
+function syncHeatControls() {
+  $('#heat-from').value = state.heatFrom ?? '';
+  $('#heat-to').value = state.heatTo ?? '';
+  for (const b of $$('#heat-metric [data-metric]')) b.setAttribute('aria-pressed', b.dataset.metric === state.heatMetric);
+}
+
+// Súlur eftir árum á völdu svæði: orka sem jafngild stærð eða fjöldi. Valin ár dekkri.
+function renderHeatYears() {
+  const ys = heat.years;
+  if (!ys.length) return;
+  const energy = state.heatMetric === 'energy';
+  const values = ys.map((d) => (energy ? d.meq : d.n));
+  // Stærð er lógaritmísk og hefur ekkert eðlilegt núll, svo súlurnar byrja aðeins neðan við minnsta gildi
+  const base = energy ? Math.floor(minOf(values.filter((v) => v != null), 9)) - 0.5 : 0;
+  const grid = css('--line');
+  const axis = { gridcolor: grid, zerolinecolor: grid, linecolor: grid, fixedrange: true };
+  Plotly.react('heat-years', [{
+    type: 'bar',
+    x: ys.map((d) => d.year),
+    y: values.map((v) => (v == null ? 0 : v - base)),
+    base,
+    customdata: ys.map((d) => (energy
+      ? d.meq == null ? 'engir skjálftar' : `samanlagt ≈ M ${fmt1(d.meq)} · ${d.n.toLocaleString('is-IS')} skjálftar`
+      : `${d.n.toLocaleString('is-IS')} skjálftar`)),
+    hovertemplate: '<b>%{x}</b>: %{customdata}<extra></extra>',
+    marker: { color: ys.map((d) => (d.year >= state.heatFrom && d.year <= state.heatTo ? css('--ink-2') : css('--bar'))) },
+  }], {
+    margin: { l: 48, r: 12, t: 8, b: 28 },
+    paper_bgcolor: 'transparent',
+    plot_bgcolor: 'transparent',
+    font: plotFont(),
+    showlegend: false,
+    bargap: 0.15,
+    dragmode: false,
+    hovermode: 'closest',
+    hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
+    xaxis: { ...axis, tickformat: 'd' },
+    yaxis: { ...axis, title: { text: energy ? 'Orka (M)' : 'Fjöldi' }, tickformat: energy ? '.0f' : '~s' },
+  }, { displaylogo: false, responsive: true, displayModeBar: false });
+  if (!heat.yearsBound) bindHeatYears();
+}
+
+function bindHeatYears() {
+  heat.yearsBound = true;
+  const el = $('#heat-years');
+  el.on('plotly_click', (ev) => {
+    const year = ev.points?.[0]?.x;
+    if (year == null) return;
+    if (ev.event?.shiftKey && heat.anchor != null) setHeatYears(Math.min(heat.anchor, year), Math.max(heat.anchor, year));
+    else {
+      heat.anchor = year;
+      setHeatYears(year, year);
+    }
+  });
+  el.on('plotly_doubleclick', () => {
+    heat.anchor = null;
+    setHeatYears(heat.years[0].year, heat.years[heat.years.length - 1].year);
+  });
+}
+
+function setHeatYears(from, to) {
+  if (from > to) [from, to] = [to, from];
+  state.heatFrom = from;
+  state.heatTo = to;
+  syncHeatControls();
+  writeUrl();
+  renderHeatYears();
+  loadHeat();
+}
+
+function setHeatMetric(metric) {
+  state.heatMetric = metric;
+  syncHeatControls();
+  writeUrl();
+  heat.layer?.setData(heat.cells, metric);
+  renderHeatYears();
+}
+
+function bindHeatControls() {
+  $('#heat-from').onchange = (e) => setHeatYears(+e.target.value, state.heatTo);
+  $('#heat-to').onchange = (e) => setHeatYears(state.heatFrom, +e.target.value);
+  $('#heat-metric').onclick = (e) => {
+    const b = e.target.closest('[data-metric]');
+    if (b) setHeatMetric(b.dataset.metric);
+  };
+}
+
 // ---------- Viðmót ----------
 
 function setView(view) {
+  if (view === 'heat' && player.active) exitPlayback();
   state.view = view;
   for (const b of $$('.tabs [data-view]')) b.setAttribute('aria-selected', b.dataset.view === view);
-  for (const id of ['map', '3d', 'table']) $(`#view-${id}`).hidden = id !== view;
+  for (const id of ['map', '3d', 'table', 'heat']) $(`#view-${id}`).hidden = id !== view;
+  // Hitakort hefur eigin ársval; síur og spjöld sem eiga við staka skjálfta eru falin (.point-only)
+  document.body.classList.toggle('heat-mode', view === 'heat');
+  if (view === 'heat') {
+    showHeat();
+    writeUrl();
+    return;
+  }
   $('#playbar').hidden = view === 'table';
   const list = visibleQuakes();
   const win = timeWindow();
@@ -1491,6 +1846,8 @@ function bindControls() {
   $('#region').onchange = (e) => {
     state.region = e.target.value;
     fitRegion();
+    if (heat.map) fitRegion(heat.map);
+    if (state.view === 'heat') loadHeatYears().then(renderHeatSummary).catch((err) => setStatus(`Villa: ${err.message}`, 'bad'));
     filtersChanged();
   };
   $('#events').onchange = (e) => {
@@ -1530,6 +1887,7 @@ function bindControls() {
   };
   $('#brush-clear').onclick = clearBrush;
   bindPlayback();
+  bindHeatControls();
   document.addEventListener('click', (e) => {
     const a = e.target.closest('.aftershocks-link');
     if (!a) return;
@@ -1544,6 +1902,10 @@ function bindControls() {
   document.addEventListener('visibilitychange', () => !document.hidden && tick());
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
     render();
+    if (heat.map) {
+      heat.layer.setData(heat.cells, state.heatMetric);
+      renderHeatYears();
+    }
   });
 }
 

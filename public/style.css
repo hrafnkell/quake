@@ -244,3 +244,11 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); 
   .playbar input[type=range] { flex-basis: 100%; order: 9; }
   .custom-range { flex-direction: column; }
 }
+
+/* Hitakort: sér flipi með eigin ársvali; síur sem eiga aðeins við staka skjálfta faldar */
+body.heat-mode .point-only { display: none !important; }
+body:not(.heat-mode) .heat-only { display: none !important; }
+#heatmap { height: min(68vh, 680px); min-height: 380px; }
+#heat-years { height: 220px; }
+.year-range { display: flex; align-items: center; gap: 6px; color: var(--ink-3); }
+#heat-summary { margin-left: auto; }

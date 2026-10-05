@@ -4,6 +4,7 @@ import { fetchCatalog, windows } from './catalog';
 import { QuakeStore } from './db';
 import { encodeColumns, toRows } from './encode';
 import { EVENTS, validateEvents } from './events';
+import { encodeCells, HeatCache, meq } from './heat';
 import { DEFAULT_REGION, PLACES, REGIONS } from './regions';
 import { fetchFeed } from './scrape';
 
@@ -26,6 +27,7 @@ const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const store = new QuakeStore(DB_PATH);
+const heat = new HeatCache(store);
 validateEvents();
 
 const status = {
@@ -112,6 +114,8 @@ async function syncCatalog() {
 
 poll();
 setInterval(poll, POLL_SECONDS * 1000);
+// Reikna hitakort liðinna ára sem vantar, í rólegheitum eftir ræsingu
+setTimeout(() => heat.warm().catch((e) => console.error('Villa við útreikning hitakorts:', e)), 15_000);
 if (CATALOG_SYNC_HOURS > 0) {
   // Fyrsta samstilling skömmu eftir ræsingu (fyllir í eyður eftir niðritíma), svo reglulega
   setTimeout(() => {
@@ -121,14 +125,59 @@ if (CATALOG_SYNC_HOURS > 0) {
   status.catalog.nextSync = Date.now() + 60_000;
 }
 
+type Body = { text: string; gz: Uint8Array | null };
+
 function json(req: Request, data: unknown, httpStatus = 200) {
-  const body = JSON.stringify(data);
+  const text = JSON.stringify(data);
+  return send(req, { text, gz: text.length > 1024 ? Bun.gzipSync(text) : null }, httpStatus);
+}
+
+function send(req: Request, body: Body, httpStatus = 200) {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
-  if (body.length > 1024 && req.headers.get('accept-encoding')?.includes('gzip')) {
+  if (body.gz && req.headers.get('accept-encoding')?.includes('gzip')) {
     headers['Content-Encoding'] = 'gzip';
-    return new Response(Bun.gzipSync(body), { status: httpStatus, headers });
+    return new Response(body.gz, { status: httpStatus, headers });
   }
-  return new Response(body, { status: httpStatus, headers });
+  return new Response(body.text, { status: httpStatus, headers });
+}
+
+// Tilbúin svör hitakorts, hreinsuð þegar gögn breytast (heat.version). Sama svar er sent öllum.
+const heatResponses = new Map<string, Body>();
+let heatResponsesVersion = -1;
+
+function cachedJson(req: Request, key: string, build: () => unknown) {
+  let body = heatResponsesVersion === heat.version ? heatResponses.get(key) : undefined;
+  if (!body) {
+    const text = JSON.stringify(build());
+    body = { text, gz: Bun.gzipSync(text) };
+    // Útgáfan er lesin eftir útreikning, sem getur sjálfur hækkað hana (t.d. ár reiknað í fyrsta sinn)
+    if (heatResponsesVersion !== heat.version || heatResponses.size > 50) {
+      heatResponses.clear();
+      heatResponsesVersion = heat.version;
+    }
+    heatResponses.set(key, body);
+  }
+  return send(req, body);
+}
+
+function heatCells(req: Request, url: URL) {
+  const current = heat.currentYear();
+  const first = heat.firstYear();
+  const from = Number(url.searchParams.get('from') ?? first);
+  const to = Number(url.searchParams.get('to') ?? current);
+  if (!Number.isInteger(from) || !Number.isInteger(to) || from > to || from < first || to > current) {
+    return json(req, { error: `Ár þurfa að vera á bilinu ${first}–${current}` }, 400);
+  }
+  return cachedJson(req, `cells:${from}:${to}`, () => ({ from, to, version: heat.version, ...encodeCells(heat.cells(from, to)) }));
+}
+
+function heatYears(req: Request, url: URL) {
+  const region = REGIONS.find((r) => r.id === (url.searchParams.get('region') ?? DEFAULT_REGION));
+  if (!region) return json(req, { error: 'Óþekkt svæði' }, 400);
+  return cachedJson(req, `years:${region.id}`, () => ({
+    version: heat.version,
+    years: heat.years(region).map((y) => ({ year: y.year, n: y.n, meq: meq(y.e) })),
+  }));
 }
 
 function numParam(url: URL, key: string, fallback: number) {
@@ -164,19 +213,26 @@ function quakes(req: Request, url: URL) {
 // Útgáfunúmer (hash af innihaldi) á app.js og style.css í index.html. Cloudflare lætur vafra
 // geyma .js/.css í 4 klst óháð Cache-Control frá okkur, svo ný slóð við hverja breytingu
 // tryggir að uppfærslur skili sér strax og leyfir langa geymslu á skránum sjálfum.
-async function buildIndex() {
+// Endurbyggt ef skrárnar breytast (t.d. í þróun án endurræsingar), annars fengi breytt app.js gömlu slóðina
+// sem vafrinn geymir sem óbreytanlega.
+const INDEX_FILES = ['index.html', 'app.js', 'style.css'];
+let index: { stamp: string; html: string } | null = null;
+
+async function indexHtml() {
+  const stamp = INDEX_FILES.map((f) => Bun.file(join(PUBLIC_DIR, f)).lastModified).join(':');
+  if (index?.stamp === stamp) return index.html;
   let html = await Bun.file(join(PUBLIC_DIR, 'index.html')).text();
   for (const asset of ['app.js', 'style.css']) {
     const hash = Bun.hash(await Bun.file(join(PUBLIC_DIR, asset)).arrayBuffer()).toString(36);
     html = html.replace(`"${asset}"`, `"${asset}?v=${hash}"`);
   }
+  index = { stamp, html };
   return html;
 }
-const indexHtml = await buildIndex();
 
 async function staticFile(path: string, versioned: boolean) {
   if (path === '/' || path === '/index.html') {
-    return new Response(indexHtml, { headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-cache' } });
+    return new Response(await indexHtml(), { headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-cache' } });
   }
   const file = normalize(join(PUBLIC_DIR, path));
   if (!file.startsWith(PUBLIC_DIR + '/')) return new Response('Not found', { status: 404 });
@@ -193,6 +249,10 @@ const server = Bun.serve({
     switch (url.pathname) {
       case '/api/quakes':
         return quakes(req, url);
+      case '/api/heat':
+        return heatCells(req, url);
+      case '/api/heat/years':
+        return heatYears(req, url);
       case '/api/regions':
         return json(req, { regions: REGIONS, places: PLACES, defaultRegion: DEFAULT_REGION, events: EVENTS });
       case '/api/status':

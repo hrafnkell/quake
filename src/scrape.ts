@@ -10,6 +10,7 @@ export type Quake = {
   refPlace: string | null;
   region?: string | null; // skjálftasvæði úr skjálftaskrá (api.vedur.is), ekki í straumnum
   eventId?: string | null; // auðkenni í skjálftaskrá, ekki í straumnum
+  suspect?: number; // 1 ef stærðin er óyfirfarin og líklega röng, reiknað í QuakeStore.query (sjá SUSPECT)
   raw: string; // allir reitir eins og uppruninn gefur þá, sem JSON
 };
 

@@ -87,6 +87,12 @@ og viðmótið gul merki á meðan. `FEED_URL` yfirskrifar slóð síðunnar (ti
   er fylki, tími sem mismunur í sekúndum, hnit ×1000, dýpt/stærð ×10, strengir sem vísar í `strings`. Helmingi minna
   þjappað en raðir og fljótara að lesa. `&format=rows` skilar hlutum (`t` í ms, `lat`, `lon`, `depth`, `mag`, `q`, `dist`, `dir`, `ref`, `region`).
   Mest 100 000 skjálftar í svari; séu fleiri á tímabilinu eru þeir stærstu sendir og `total` segir heildarfjöldann.
+  Tímabil má mest vera 366 dagar (stærri fyrirspurnir tóku 2–3 s og stöðvuðu þjóninn á meðan); notið hitakortið fyrir lengri tíma.
+  `sus` = 1: óyfirfarin sjálfvirk stærð M4+ eldri en 30 daga, líklega röng (sjá `SUSPECT` í `src/db.ts`); viðmótið sýnir hana sem M4.
+- `GET /api/heat?from=<ár>&to=<ár>`: hitakort, ~1 km reitir (`y` = ⌊breidd×100⌋, `x` = ⌊lengd×50⌋) með fjölda (`count`),
+  samanlagðri orku sem jafngildri stærð ×100 (`meq`, log10(Σ10^(1,5·M))/1,5) og stærsta skjálfta ×10 (`mx`).
+  Liðin ár eru reiknuð einu sinni og geymd í `heat_cells`; ár er reiknað aftur ef skjálfti á því breytist. Sjá `src/heat.ts`.
+- `GET /api/heat/years?region=`: fjöldi og jafngild stærð hvers árs á svæðinu
 - `GET /api/regions`: svæði, örnefni og atburðir
 - `GET /api/status`: síðasta sókn, villur, fjöldi í grunni (`total` virkir, `withdrawn` felldir út), `catalog` (síðasta samstilling við skjálftaskrá)
 

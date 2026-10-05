@@ -24,10 +24,10 @@
     <label>Svæði
       <select id="region"></select>
     </label>
-    <label>Atburðir
+    <label class="point-only">Atburðir
       <select id="events" title="Stilla svæði og tímabil á aðdraganda atburðar"></select>
     </label>
-    <div class="field">
+    <div class="field point-only">
       <span class="label">Tímabil</span>
       <div class="segmented" id="presets">
         <button type="button" data-preset="24h">24 klst</button>
@@ -38,11 +38,11 @@
         <button type="button" data-preset="custom">Sérsniðið</button>
       </div>
     </div>
-    <div class="field custom-range" id="custom-range" hidden>
+    <div class="field custom-range point-only" id="custom-range" hidden>
       <label>Frá <input type="datetime-local" id="from"></label>
       <label>Til <input type="datetime-local" id="to"></label>
     </div>
-    <div class="field">
+    <div class="field point-only">
       <span class="label">Stærð</span>
       <div class="mag-range">
         <input type="number" id="min-mag" step="0.5" min="-1" max="9" placeholder="frá" aria-label="Lágmarksstærð">
@@ -50,16 +50,33 @@
         <input type="number" id="max-mag" step="0.5" min="-1" max="9" placeholder="til" aria-label="Hámarksstærð">
       </div>
     </div>
+    <div class="field heat-only">
+      <span class="label">Ár</span>
+      <div class="year-range">
+        <select id="heat-from" aria-label="Frá ári"></select>
+        <span>–</span>
+        <select id="heat-to" aria-label="Til árs"></select>
+      </div>
+    </div>
+    <div class="field heat-only">
+      <span class="label">Sýna</span>
+      <div class="segmented" id="heat-metric">
+        <button type="button" data-metric="energy" title="Samanlögð orka skjálfta í hverjum reit, sem stærð eins skjálfta">Orka</button>
+        <button type="button" data-metric="count" title="Fjöldi skjálfta í hverjum reit">Fjöldi</button>
+      </div>
+    </div>
   </form>
 
-  <section class="stats" id="stats"></section>
+  <section class="stats point-only" id="stats"></section>
 
   <main>
     <div class="tabs" role="tablist">
       <button type="button" role="tab" data-view="map">Kort</button>
       <button type="button" role="tab" data-view="3d">3D</button>
       <button type="button" role="tab" data-view="table">Tafla</button>
-      <span id="brush-chip" class="chip" hidden>
+      <button type="button" role="tab" data-view="heat">Hitakort</button>
+      <span id="heat-summary" class="hint heat-only"></span>
+      <span id="brush-chip" class="chip point-only" hidden>
         <span id="brush-text"></span>
         <button type="button" id="brush-clear" aria-label="Hreinsa tímaval">✕</button>
       </span>
@@ -67,8 +84,9 @@
     <div class="view" id="view-map"><div id="map"></div></div>
     <div class="view" id="view-3d" hidden><div id="plot3d"></div></div>
     <div class="view" id="view-table" hidden><div class="table-wrap"><table id="table"></table></div></div>
+    <div class="view" id="view-heat" hidden><div id="heatmap"></div></div>
 
-    <section class="playbar" id="playbar">
+    <section class="playbar point-only" id="playbar">
       <button type="button" id="play" class="play" aria-label="Spila" title="Spila (bilslá)">▶</button>
       <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Staða í afspilun">
       <span id="play-time" class="play-time"></span>
@@ -81,7 +99,7 @@
       <button type="button" id="play-stop" class="play" aria-label="Hætta afspilun" title="Hætta afspilun (Esc)" hidden>■</button>
     </section>
 
-    <section class="analysis-card" id="aftershocks" hidden>
+    <section class="analysis-card point-only" id="aftershocks" hidden>
       <div class="card-head">
         <h2 id="aftershocks-title">Eftirskjálftar</h2>
         <span class="hint" id="aftershocks-summary"></span>
@@ -91,7 +109,15 @@
       <p class="hint" id="aftershocks-note"></p>
     </section>
 
-    <section class="timeline-card">
+    <section class="timeline-card heat-only">
+      <div class="card-head">
+        <h2>Eftir árum</h2>
+        <span class="hint">Smelltu á ár til að skoða það eitt, með shift til að velja bil, tvísmelltu til að sýna öll ár</span>
+      </div>
+      <div id="heat-years"></div>
+    </section>
+
+    <section class="timeline-card point-only">
       <div class="card-head">
         <h2>Tímalína</h2>
         <span class="hint">Dragðu til að færa (sækir eldri gögn ef þarf), skrunaðu eftir smell til að þysja, tvísmelltu til að sýna allt</span>
