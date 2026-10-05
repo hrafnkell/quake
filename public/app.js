@@ -222,7 +222,8 @@ async function loadQuakes({ quiet = false } = {}) {
     from = now - PRESETS[state.preset] * HOUR;
     to = now + 60e3;
   }
-  const p = new URLSearchParams({ region: state.region, from, to });
+  // Allt landið, svo hægt sé að færa kortið; svæðaval þysjar aðeins (sjá Sýnilegt svæði)
+  const p = new URLSearchParams({ region: 'island', from, to });
   if (state.minMag != null) p.set('minMag', state.minMag);
   if (state.maxMag != null) p.set('maxMag', state.maxMag);
   if (state.minDepth != null) p.set('minDepth', state.minDepth);
@@ -292,10 +293,55 @@ function setStatus(text, kind = '') {
 
 // ---------- Teikning ----------
 
-function visibleQuakes() {
-  if (!state.brush) return quakes;
+// ---------- Sýnilegt svæði ----------
+// Gögn eru alltaf sótt fyrir allt landið, svo hægt sé að færa kortið og skoða nágrennið; svæðaval og
+// atburðir þysja aðeins kortið. Tölur, tímalína, tafla, 3D og afspilun sýna það sem er innan sýnilega
+// kortsins (focus), uppfært þegar kortið stöðvast. Kortið sjálft teiknar allt.
+let focus = null; // { lat: [s, n], lon: [w, e] }, null = allt
+let areaCache = null;
+
+function setFocus(f) {
+  focus = f;
+  areaCache = null;
+}
+
+const inFocus = (q) => q.lat >= focus.lat[0] && q.lat <= focus.lat[1] && q.lon >= focus.lon[0] && q.lon <= focus.lon[1];
+
+// Skjálftar innan sýnilega svæðisins, óháð tímavali á tímalínu
+function areaQuakes() {
+  if (areaCache?.quakes !== quakes || areaCache.focus !== focus) {
+    areaCache = { quakes, focus, list: focus ? quakes.filter(inFocus) : quakes };
+  }
+  return areaCache.list;
+}
+
+function brushed(list) {
+  if (!state.brush) return list;
   const [a, b] = state.brush;
-  return quakes.filter((q) => q.t >= a && q.t <= b);
+  return list.filter((q) => q.t >= a && q.t <= b);
+}
+
+// Tölur, tafla, 3D og afspilun: sýnilegt svæði og tímaval
+const visibleQuakes = () => brushed(areaQuakes());
+// Kortið: allt landið innan tímavals
+const mapQuakes = () => brushed(quakes);
+
+// Kortið stöðvaðist eftir færslu eða þysjun: nýtt sýnilegt svæði
+function onMapMoved() {
+  if (state.view !== 'map') return; // falið kort hefur enga stærð; fitRegion setur svæðið þá
+  const b = map.getBounds();
+  setFocus({ lat: [b.getSouth(), b.getNorth()], lon: [b.getWest(), b.getEast()] });
+  if (!player.active) renderArea();
+}
+
+// Allt sem fer eftir sýnilega svæðinu (kortið sjálft breytist ekki)
+function renderArea() {
+  const list = visibleQuakes();
+  const win = timeWindow();
+  renderStats(list);
+  renderTimeline(win);
+  if (state.view === '3d') render3d(list, win);
+  if (state.view === 'table') renderTable(list, win);
 }
 
 function render() {
@@ -303,7 +349,7 @@ function render() {
   const list = visibleQuakes();
   const win = timeWindow();
   renderStats(list);
-  renderMap(list, win);
+  renderMap(mapQuakes(), win);
   renderEvents(win);
   renderLegend(win);
   if (state.view === '3d') render3d(list, win);
@@ -482,6 +528,7 @@ function initMap() {
   L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
   L.control.scale({ imperial: false }).addTo(map);
   quakeLayer = new QuakeCanvas().addTo(map);
+  map.on('moveend', onMapMoved);
   initMapControls();
 }
 
@@ -546,8 +593,16 @@ function fitRegion(m = map) {
   const r = regions.find((r) => r.id === state.region);
   if (!r) return;
   const b = bounds(r);
+  // Falið kort (3D, tafla) hefur enga stærð og lætur ekki vita af færslu: svæðið sjálft er þá sýnilega svæðið,
+  // og allt landið nær líka yfir skjálfta utan við strönd
+  if (m === map && state.view !== 'map') {
+    setFocus(b === ICELAND ? null : { lat: [...b.lat], lon: [...b.lon] });
+    mapFitPending = true; // þysjað þegar kortið birtist aftur
+    return;
+  }
   m.fitBounds([[b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]]);
 }
+let mapFitPending = false;
 
 function renderMap(list, win) {
   quakeLayer.setStatic(list, win);
@@ -930,8 +985,9 @@ function plotFont() {
 }
 
 function renderTimeline(win) {
-  const x = quakes.map((q) => isoLocal(q.t));
-  const styles = quakes.map((q) => style(q, win));
+  const tl = (timelineList = areaQuakes());
+  const x = tl.map((q) => isoLocal(q.t));
+  const styles = tl.map((q) => style(q, win));
   const grid = css('--line');
   const bin = binSize(win[1] - win[0]);
 
@@ -947,8 +1003,8 @@ function renderTimeline(win) {
     type: 'scattergl',
     mode: 'markers',
     x,
-    y: quakes.map(shownMag), // grunsamleg stærð teygir annars ásinn upp í „M9“
-    customdata: quakes.map((q) => [fmtDateTime.format(q.t), q.depth, esc(place(q)), q.sus ? ` (skráð M ${fmt1(q.mag)}, óyfirfarin)` : '']),
+    y: tl.map(shownMag), // grunsamleg stærð teygir annars ásinn upp í „M9“
+    customdata: tl.map((q) => [fmtDateTime.format(q.t), q.depth, esc(place(q)), q.sus ? ` (skráð M ${fmt1(q.mag)}, óyfirfarin)` : '']),
     hovertemplate: '<b>M %{y:.1f}</b>%{customdata[3]} · dýpt %{customdata[1]:.1f} km<br>%{customdata[0]}<br>%{customdata[2]}<extra></extra>',
     // Jafnstórir punktar; stærðin er á y-ásnum og misstórir punktar gera þétta tímalínu ólæsilega
     marker: {
@@ -993,6 +1049,7 @@ function renderTimeline(win) {
 }
 
 let timelineBound = false;
+let timelineList = []; // skjálftarnir sem tímalínan sýnir, í sömu röð (fyrir smell á punkt)
 
 // Bil haldið innan marka, með sömu lengd ef hægt er; aldrei lengra en MAX_SPAN (þysjað um miðjuna)
 function clampRange(a, b, lim) {
@@ -1060,14 +1117,14 @@ function bindTimeline() {
     const list = visibleQuakes();
     const win = timeWindow();
     renderStats(list);
-    renderMap(list, win);
+    renderMap(mapQuakes(), win);
     if (state.view === '3d') render3d(list, win);
     if (state.view === 'table') renderTable(list, win);
     renderBrushChip();
   });
   el.on('plotly_click', (ev) => {
     const pt = ev.points.find((p) => p.data.type === 'scattergl');
-    if (pt) focusQuake(quakes[pt.pointIndex]);
+    if (pt) focusQuake(timelineList[pt.pointIndex]);
   });
   bindTimelineWheel(el);
   el.addEventListener('dblclick', clearBrush);
@@ -1160,8 +1217,8 @@ function outlineTrace(rings, r, color, width) {
 // 'shown' er sá hluti listans sem er teiknaður (afspilun); ásar og rammi miðast við allan listann
 function render3d(list, win, shown = list, at) {
   const region = regions.find((r) => r.id === state.region);
-  let r = bounds(region);
-  if (r === ICELAND && list.length) {
+  let r = focus ?? bounds(region);
+  if (!focus && r === ICELAND && list.length) {
     // Allt landið ásamt skjálftum utan við strönd
     const pad = (a, [lo, hi]) => [minOf(a, lo + 0.1) - 0.1, maxOf(a, hi - 0.1) + 0.1];
     r = { lat: pad(list.map((q) => q.lat), ICELAND.lat), lon: pad(list.map((q) => q.lon), ICELAND.lon) };
@@ -1322,7 +1379,7 @@ function exitPlayback({ rerender = true } = {}) {
   Plotly.relayout('timeline', timelineShapes());
   const list = visibleQuakes();
   const win = timeWindow();
-  renderMap(list, win); // kyrrstæð sýn aftur á canvasið
+  renderMap(mapQuakes(), win); // kyrrstæð sýn aftur á canvasið
   if (rerender) {
     renderStats(list);
     if (state.view === '3d') render3d(list, win);
@@ -1881,7 +1938,14 @@ function setView(view) {
   $('#playbar').hidden = view === 'table';
   const list = visibleQuakes();
   const win = timeWindow();
-  if (view === 'map') map.invalidateSize();
+  if (view === 'map') {
+    map.invalidateSize();
+    // Svæði valið meðan kortið var falið, annars sýnilega svæðið eins og það er
+    if (mapFitPending) {
+      mapFitPending = false;
+      fitRegion();
+    } else onMapMoved();
+  }
   if (view === '3d') render3d(list, win);
   if (view === '3d' && player.active) renderPlayback3d();
   if (view === 'table') renderTable(list, win);
@@ -1912,12 +1976,15 @@ function filtersChanged() {
 }
 
 function bindControls() {
+  // Svæði þysjar aðeins kortið; gögnin eru fyrir allt landið og þarf ekki að sækja aftur
   $('#region').onchange = (e) => {
     state.region = e.target.value;
+    syncControls();
+    writeUrl();
     fitRegion();
     if (heat.map) fitRegion(heat.map);
     if (state.view === 'heat') loadHeatYears().then(renderHeatSummary).catch((err) => setStatus(`Villa: ${err.message}`, 'bad'));
-    filtersChanged();
+    else if (state.view !== 'map') renderArea(); // kortið kallar sjálft á renderArea þegar það stöðvast
   };
   $('#events').onchange = (e) => {
     if (e.target.value) applyEvent(e.target.value);
