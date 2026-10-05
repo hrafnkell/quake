@@ -11,7 +11,7 @@
   <header>
     <div>
       <h1>Jarðskjálftar <span id="region-name"></span></h1>
-      <p class="sub">Gögn frá <a href="https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar">Veðurstofu Íslands</a>. Tímar eru íslenskir.</p>
+      <p class="sub">Gögn frá <a href="https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar">Veðurstofu Íslands</a> (<a href="https://api.vedur.is/quakes/">skjálftaskrá</a>, CC BY 4.0). Tímar eru íslenskir.</p>
     </div>
     <div class="live">
       <span id="status-dot" class="dot"></span>
@@ -65,6 +65,19 @@
     <div class="view" id="view-map"><div id="map"></div></div>
     <div class="view" id="view-3d" hidden><div id="plot3d"></div></div>
     <div class="view" id="view-table" hidden><div class="table-wrap"><table id="table"></table></div></div>
+
+    <section class="playbar" id="playbar">
+      <button type="button" id="play" class="play" aria-label="Spila" title="Spila (bilslá)">▶</button>
+      <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Staða í afspilun">
+      <span id="play-time" class="play-time"></span>
+      <select id="play-duration" aria-label="Lengd afspilunar" title="Lengd afspilunar">
+        <option value="15000">15 s</option>
+        <option value="30000" selected>30 s</option>
+        <option value="60000">1 mín</option>
+        <option value="120000">2 mín</option>
+      </select>
+      <button type="button" id="play-stop" class="play" aria-label="Hætta afspilun" title="Hætta afspilun (Esc)" hidden>■</button>
+    </section>
 
     <section class="timeline-card">
       <div class="card-head">

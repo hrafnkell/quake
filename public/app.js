@@ -65,7 +65,8 @@ function spanLabel(ms) {
   return `${Math.round(h / 24 / 30)} mán`;
 }
 
-const place = (q) => (q.ref ? `${q.dist != null ? fmt1(q.dist) + ' km ' : ''}${q.dir ?? ''} af ${q.ref.replaceAll('_', ' ')}` : '');
+// Skjálftar úr skjálftaskrá (bakfylling) hafa aðeins svæðisheiti, ekki fjarlægð frá örnefni
+const place = (q) => (q.ref ? `${q.dist != null ? fmt1(q.dist) + ' km ' : ''}${q.dir ?? ''} af ${q.ref.replaceAll('_', ' ')}` : q.region ?? '');
 
 // Íslenskur tími = UTC, svo ISO án tímabeltis er réttur tími fyrir Plotly og datetime-local
 const isoLocal = (ms) => new Date(ms).toISOString().slice(0, 19);
@@ -93,16 +94,19 @@ function timeWindow() {
   return [now - h * HOUR, now];
 }
 
-function style(q, win) {
-  const t = (win[1] - q.t) / Math.max(win[1] - win[0], 1);
+// Stærð eftir orku: þvermál tvöfaldast fyrir hverja stærðareiningu. Rétt orkukvörðun
+// (×32 á einingu) myndi láta M4 gleypa kortið, svo þetta er málamiðlun.
+const radiusFor = (mag) => clamp(2.5 * 2 ** mag, 2.5, 48);
+
+// 'at' er viðmiðunartími fyrir aldur (afspilun); sjálfgefið endi gluggans / núna
+function style(q, win, at) {
+  const t = ((at ?? win[1]) - q.t) / Math.max(win[1] - win[0], 1);
   const [r, g, b] = rampColor(t);
   return {
     fill: `rgb(${r},${g},${b})`,
     opacity: 0.92 - 0.45 * clamp(t, 0, 1),
-    // Stærð eftir orku: þvermál tvöfaldast fyrir hverja stærðareiningu. Rétt orkukvörðun
-    // (×32 á einingu) myndi láta M4 gleypa kortið, svo þetta er málamiðlun.
-    radius: clamp(2.5 * 2 ** q.mag, 2.5, 48),
-    recent: Date.now() - q.t < HOUR,
+    radius: radiusFor(q.mag),
+    recent: (at ?? Date.now()) - q.t < HOUR,
   };
 }
 
@@ -187,7 +191,7 @@ async function checkStatus() {
 }
 
 async function tick() {
-  if (document.hidden || !$('#auto').checked) return;
+  if (document.hidden || !$('#auto').checked || player.active) return;
   const s = await checkStatus();
   if (!s) return;
   // Sækja aftur ef ný gögn eru komin eða ef glugginn hreyfist (t.d. "síðustu 48 klst")
@@ -209,6 +213,7 @@ function visibleQuakes() {
 }
 
 function render() {
+  if (player.active) exitPlayback({ rerender: false });
   const list = visibleQuakes();
   const win = timeWindow();
   renderStats(list);
@@ -218,6 +223,7 @@ function render() {
   if (state.view === 'table') renderTable(list, win);
   renderTimeline(win);
   renderBrushChip();
+  updatePlaybackUi();
 }
 
 function renderStats(list) {
@@ -308,7 +314,7 @@ function renderMap(list, win) {
 function renderLegend(win) {
   const stops = RAMPS[dark() ? 'dark' : 'light'];
   const sizes = [1, 2, 3, 4].map((m) => {
-    const d = 2 * clamp(2.5 * 2 ** m, 2.5, 48);
+    const d = 2 * radiusFor(m);
     return `<div><i style="width:${d}px;height:${d}px"></i>M${m}</div>`;
   });
   legendControl.getContainer().innerHTML = `
@@ -361,10 +367,11 @@ function renderTimeline(win) {
     y: quakes.map((q) => q.mag),
     customdata: quakes.map((q) => [fmtDateTime.format(q.t), q.depth, place(q)]),
     hovertemplate: '<b>M %{y:.1f}</b> · dýpt %{customdata[1]:.1f} km<br>%{customdata[0]}<br>%{customdata[2]}<extra></extra>',
+    // Jafnstórir punktar; stærðin er á y-ásnum og misstórir punktar gera þétta tímalínu ólæsilega
     marker: {
-      size: styles.map((s) => clamp(s.radius * 1.1, 4, 30)),
+      size: 5,
       color: styles.map((s) => s.fill),
-      opacity: 0.8,
+      opacity: 0.7,
       line: { width: 0 },
     },
   };
@@ -382,6 +389,7 @@ function renderTimeline(win) {
     hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
     // Halda vali á tímabili þegar gögn uppfærast sjálfkrafa
     uirevision: `${state.region}|${state.preset}|${state.from}|${state.to}|${state.minMag}|${state.maxMag}`,
+    shapes: playheadShapes(),
     xaxis: { ...axis, type: 'date', range: state.brush ? undefined : [isoLocal(win[0]), isoLocal(win[1])] },
     yaxis: { ...axis, domain: [0, 0.68], title: { text: 'Stærð' }, fixedrange: true, rangemode: 'tozero' },
     yaxis2: { ...axis, domain: [0.76, 1], title: { text: 'Fjöldi' }, fixedrange: true, rangemode: 'tozero', tickformat: 'd', nticks: 3 },
@@ -402,6 +410,7 @@ function bindTimeline() {
     } else if (ev['xaxis.autorange']) {
       state.brush = null;
     } else return;
+    if (player.active) exitPlayback({ rerender: false });
     const list = visibleQuakes();
     const win = timeWindow();
     renderStats(list);
@@ -465,7 +474,8 @@ function outlineTrace(rings, r, color, width) {
   };
 }
 
-function render3d(list, win) {
+// 'shown' er sá hluti listans sem er teiknaður (afspilun); ásar og rammi miðast við allan listann
+function render3d(list, win, shown = list, at) {
   const region = regions.find((r) => r.id === state.region);
   let r = bounds(region);
   if (r === ICELAND && list.length) {
@@ -477,17 +487,17 @@ function render3d(list, win) {
   const kmX = (r.lon[1] - r.lon[0]) * 111.32 * Math.cos((latMid * Math.PI) / 180);
   const kmY = (r.lat[1] - r.lat[0]) * 111.32;
   const maxDepth = Math.max(10, ...list.map((q) => q.depth));
-  const styles = list.map((q) => style(q, win));
+  const styles = shown.map((q) => style(q, win, at));
   const grid = css('--line');
   const axis = { gridcolor: grid, zerolinecolor: grid, backgroundcolor: 'transparent', color: css('--ink-2') };
 
   const trace = {
     type: 'scatter3d',
     mode: 'markers',
-    x: list.map((q) => q.lon),
-    y: list.map((q) => q.lat),
-    z: list.map((q) => q.depth),
-    customdata: list.map((q) => [q.mag, fmtDateTime.format(q.t), place(q)]),
+    x: shown.map((q) => q.lon),
+    y: shown.map((q) => q.lat),
+    z: shown.map((q) => q.depth),
+    customdata: shown.map((q) => [q.mag, fmtDateTime.format(q.t), place(q)]),
     hovertemplate: '<b>M %{customdata[0]:.1f}</b><br>Dýpt: %{z:.1f} km<br>%{customdata[1]}<br>%{customdata[2]}<extra></extra>',
     marker: {
       size: styles.map((s) => clamp(s.radius * 0.9, 2, 30)),
@@ -506,7 +516,7 @@ function render3d(list, win) {
     mode: 'markers',
     x: trace.x,
     y: trace.y,
-    z: list.map(() => 0),
+    z: shown.map(() => 0),
     marker: { size: 3.5, color: css('--ink-2'), opacity: 0.7, line: { width: 0 } },
     hoverinfo: 'skip',
   };
@@ -535,9 +545,17 @@ function render3d(list, win) {
 // --- Tafla ---
 
 const TABLE_LIMIT = 1000;
+// Röðun með smelli á dálkheiti; sjálfgefið nýjasti fyrst
+const tableSort = { key: 't', desc: true };
+const SORT_KEYS = { t: 'Tími', mag: 'Stærð', depth: 'Dýpt' };
 
 function renderTable(list, win) {
-  const rows = [...list].reverse().slice(0, TABLE_LIMIT);
+  const { key, desc } = tableSort;
+  const rows = [...list].sort((a, b) => (desc ? b[key] - a[key] : a[key] - b[key]) || b.t - a.t).slice(0, TABLE_LIMIT);
+  const th = (k, cls = '') => {
+    const active = k === tableSort.key;
+    return `<th class="sortable ${cls}" data-sort="${k}" aria-sort="${active ? (desc ? 'descending' : 'ascending') : 'none'}">${SORT_KEYS[k]}<span class="sort-arrow">${active ? (desc ? '▼' : '▲') : ''}</span></th>`;
+  };
   const body = rows.map((q, i) => `<tr data-i="${i}">
       <td>${fmtDateTime.format(q.t)}</td>
       <td class="num"><span class="swatch" style="background:${style(q, win).fill}"></span>${fmt1(q.mag)}</td>
@@ -545,12 +563,287 @@ function renderTable(list, win) {
       <td>${esc(place(q))}</td>
       <td class="num">${q.q != null ? fmt1(q.q) : ''}</td>
     </tr>`).join('');
-  const more = list.length > TABLE_LIMIT ? `<caption>Sýni ${TABLE_LIMIT} nýjustu af ${list.length.toLocaleString('is-IS')}</caption>` : '';
-  $('#table').innerHTML = `${more}<thead><tr><th>Tími</th><th class="num">Stærð</th><th class="num">Dýpt</th><th>Staðsetning</th><th class="num">Gæði</th></tr></thead><tbody>${body}</tbody>`;
+  const more = list.length > TABLE_LIMIT ? `<caption>Sýni ${TABLE_LIMIT} af ${list.length.toLocaleString('is-IS')} eftir röðun</caption>` : '';
+  $('#table').innerHTML = `${more}<thead><tr>${th('t')}${th('mag', 'num')}${th('depth', 'num')}<th>Staðsetning</th><th class="num">Gæði</th></tr></thead><tbody>${body}</tbody>`;
   $('#table').onclick = (e) => {
+    const h = e.target.closest('th[data-sort]');
+    if (h) {
+      tableSort.desc = h.dataset.sort === tableSort.key ? !tableSort.desc : true;
+      tableSort.key = h.dataset.sort;
+      renderTable(list, win);
+      return;
+    }
     const tr = e.target.closest('tr[data-i]');
     if (tr) focusQuake(rows[+tr.dataset.i]);
   };
+}
+
+// ---------- Afspilun ----------
+// Skjálftar tímabilsins birtast í þeirri röð sem þeir urðu, allt tímabilið á `duration` ms (30 s sjálfgefið).
+// Á kortinu er teiknað á tvö canvas í stað Leaflet-merkja: grunnlag með „settum“ skjálftum sem er
+// endurteiknað með aðlöguðu millibili (litur kólnar með aldri miðað við afspilunartímann), og topplag
+// með nýbirtum skjálftum sem skreppa saman úr yfirstærð með hring sem þenst út, teiknað í hverjum ramma.
+
+const POP_MS = 700;
+const UI_EVERY = 100; // sleði, tími, tímalína
+const STATS_EVERY = 250; // tölur og 3D
+
+const player = {
+  active: false, // afspilunarlag í stað merkja
+  playing: false,
+  t: 0, // afspilunartími, ms
+  duration: 30e3,
+  range: null, // [ms, ms]
+  list: [], // skjálftar tímabilsins í tímaröð
+  cursor: 0, // fyrsti skjálfti sem er ekki enn birtur
+  shown: new Map(), // skjálfti -> performance.now() þegar hann birtist
+  lastFrame: 0,
+  lastUi: 0,
+  lastStats: 0,
+  raf: 0,
+  layer: null,
+};
+
+const playRange = () => state.brush ?? timeWindow();
+
+const durationLabel = (ms) => (ms < 60e3 ? `${ms / 1000} s` : `${ms / 60e3} mín`);
+
+// Litaskali sem fall af aldri (0 = nýr, 1 = jafngamall tímabilinu), flýtiminni fyrir hvern grunnramma
+function makeRamp() {
+  const lut = Array.from({ length: 65 }, (_, i) => `rgb(${rampColor(i / 64).join(',')})`);
+  return (t) => lut[Math.round(clamp(t, 0, 1) * 64)];
+}
+
+const PlaybackLayer = L.Layer.extend({
+  onAdd(map) {
+    this._map = map;
+    const pane = map.getPanes().overlayPane;
+    this._base = L.DomUtil.create('canvas', 'leaflet-zoom-hide playback-canvas', pane);
+    this._top = L.DomUtil.create('canvas', 'leaflet-zoom-hide playback-canvas', pane);
+    this._pending = []; // nýbirtir skjálftar sem eru ekki enn á grunnlaginu
+    this._lastBase = 0;
+    map.on('moveend zoomend resize', this._reset, this);
+    this._reset();
+  },
+  onRemove(map) {
+    map.off('moveend zoomend resize', this._reset, this);
+    this._base.remove();
+    this._top.remove();
+  },
+  _reset() {
+    const size = this._map.getSize();
+    this._origin = this._map.containerPointToLayerPoint([0, 0]);
+    this._dpr = devicePixelRatio || 1;
+    for (const c of [this._base, this._top]) {
+      L.DomUtil.setPosition(c, this._origin);
+      c.width = size.x * this._dpr;
+      c.height = size.y * this._dpr;
+      c.style.width = `${size.x}px`;
+      c.style.height = `${size.y}px`;
+    }
+    this._size = size;
+    this.redrawAll();
+  },
+  _point(q) {
+    const p = this._map.latLngToLayerPoint([q.lat, q.lon]);
+    return [p.x - this._origin.x, p.y - this._origin.y];
+  },
+  _ctx(canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
+    ctx.clearRect(0, 0, this._size.x, this._size.y);
+    return ctx;
+  },
+  // Einn skjálfti: fylltur hringur, útlína ef hann er innan klukkustundar frá afspilunartíma,
+  // og í „poppinu“ (p frá 0 til 1) yfirstærð sem skreppur saman ásamt hring sem þenst út og dofnar
+  _draw(ctx, q, ramp, span, p = 1) {
+    const [x, y] = this._point(q);
+    const r = radiusFor(q.mag);
+    if (x < -r * 4 || y < -r * 4 || x > this._size.x + r * 4 || y > this._size.y + r * 4) return;
+    const age = (player.t - q.t) / span;
+    const color = ramp(age);
+    const alpha = 0.92 - 0.45 * clamp(age, 0, 1);
+    const ease = 1 - (1 - p) ** 3;
+    ctx.beginPath();
+    ctx.arc(x, y, r * (1 + 1.4 * (1 - ease)), 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    const recent = player.t - q.t < HOUR;
+    ctx.lineWidth = recent ? 2 : 1;
+    ctx.strokeStyle = recent ? this._ink : color;
+    ctx.globalAlpha = recent ? 0.9 : Math.min(1, alpha + 0.1);
+    ctx.stroke();
+    if (p < 1) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * (1 + 2.5 * ease) + 2, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = (1 - ease) * 0.9;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  },
+  // Grunnlag: allir settir skjálftar, stórir fyrst svo litlir hverfi ekki undir þá
+  redrawAll(now = performance.now()) {
+    this._ink = css('--ink');
+    const span = Math.max(player.range[1] - player.range[0], 1);
+    const ramp = makeRamp();
+    const ctx = this._ctx(this._base);
+    for (const q of player.byMag) {
+      const shownAt = player.shown.get(q);
+      if (shownAt != null && now - shownAt >= POP_MS) this._draw(ctx, q, ramp, span);
+    }
+    this._lastBase = now;
+    this._pending = this._pending.filter((q) => now - player.shown.get(q) < POP_MS);
+    this._ctx(this._top);
+  },
+  // Hver rammi: grunnlag með millibili sem vex með fjölda, topplag með öllu sem grunnlagið nær ekki enn til
+  draw(now, fresh) {
+    this._pending.push(...fresh);
+    const interval = clamp(player.shown.size / 25, 16, 500);
+    if (now - this._lastBase >= interval) this.redrawAll(now);
+    const span = Math.max(player.range[1] - player.range[0], 1);
+    const ramp = makeRamp();
+    const ctx = this._ctx(this._top);
+    for (const q of this._pending) this._draw(ctx, q, ramp, span, clamp((now - player.shown.get(q)) / POP_MS, 0, 1));
+  },
+});
+
+function playheadShapes() {
+  if (!player.active) return [];
+  const x = isoLocal(player.t);
+  return [{ type: 'line', xref: 'x', yref: 'paper', x0: x, x1: x, y0: 0, y1: 1, line: { color: css('--accent'), width: 2 } }];
+}
+
+function enterPlayback() {
+  player.active = true;
+  player.range = playRange();
+  player.list = visibleQuakes();
+  player.byMag = [...player.list].sort((a, b) => b.mag - a.mag);
+  player.t = player.range[0];
+  player.cursor = 0;
+  player.shown = new Map();
+  map.removeLayer(quakeLayer);
+  player.layer = new PlaybackLayer().addTo(map);
+  updatePlaybackUi();
+}
+
+function exitPlayback({ rerender = true } = {}) {
+  player.playing = false;
+  cancelAnimationFrame(player.raf);
+  player.active = false;
+  if (player.layer) map.removeLayer(player.layer);
+  player.layer = null;
+  quakeLayer.addTo(map);
+  Plotly.relayout('timeline', { shapes: [] });
+  if (rerender) {
+    const list = visibleQuakes();
+    const win = timeWindow();
+    renderStats(list);
+    renderMap(list, win);
+    if (state.view === '3d') render3d(list, win);
+  }
+  updatePlaybackUi();
+}
+
+function startPlayback() {
+  if (!player.active) enterPlayback();
+  if (player.t >= player.range[1]) seekPlayback(0);
+  player.playing = true;
+  player.lastFrame = performance.now();
+  player.raf = requestAnimationFrame(playbackFrame);
+  updatePlaybackUi();
+}
+
+function pausePlayback() {
+  player.playing = false;
+  cancelAnimationFrame(player.raf);
+  updatePlaybackUi();
+}
+
+function togglePlayback() {
+  if (player.playing) pausePlayback();
+  else startPlayback();
+}
+
+function playbackFrame(now) {
+  if (!player.playing) return;
+  const span = player.range[1] - player.range[0];
+  player.t = Math.min(player.range[1], player.t + ((now - player.lastFrame) * span) / player.duration);
+  player.lastFrame = now;
+  const fresh = [];
+  while (player.cursor < player.list.length && player.list[player.cursor].t <= player.t) {
+    const q = player.list[player.cursor++];
+    player.shown.set(q, now);
+    fresh.push(q);
+  }
+  player.layer.draw(now, fresh);
+  const done = player.t >= player.range[1];
+  if (done || now - player.lastUi >= UI_EVERY) {
+    player.lastUi = now;
+    updatePlaybackUi();
+  }
+  if (done || now - player.lastStats >= STATS_EVERY) {
+    player.lastStats = now;
+    renderStats(player.list.slice(0, player.cursor));
+    if (state.view === '3d') renderPlayback3d();
+  }
+  if (done) pausePlayback();
+  else player.raf = requestAnimationFrame(playbackFrame);
+}
+
+// Hoppa á stað (0–1): allt fram að staðnum telst sett, engin popp
+function seekPlayback(frac) {
+  if (!player.active) enterPlayback();
+  player.t = player.range[0] + frac * (player.range[1] - player.range[0]);
+  player.shown = new Map();
+  player.cursor = 0;
+  while (player.cursor < player.list.length && player.list[player.cursor].t <= player.t) {
+    player.shown.set(player.list[player.cursor++], -Infinity);
+  }
+  player.layer.redrawAll();
+  renderStats(player.list.slice(0, player.cursor));
+  if (state.view === '3d') renderPlayback3d();
+  updatePlaybackUi();
+}
+
+function renderPlayback3d() {
+  render3d(player.list, player.range, player.list.slice(0, player.cursor), player.t);
+}
+
+function updatePlaybackUi() {
+  const [a, b] = player.active ? player.range : playRange();
+  $('#play').textContent = player.playing ? '❙❙' : '▶';
+  $('#play').setAttribute('aria-label', player.playing ? 'Hlé' : 'Spila');
+  $('#play').setAttribute('aria-pressed', player.playing);
+  $('#play-stop').hidden = !player.active;
+  if (player.active) {
+    $('#scrub').value = Math.round(((player.t - a) / Math.max(b - a, 1)) * 1000);
+    $('#play-time').textContent = fmtDateTime.format(player.t);
+    Plotly.relayout('timeline', { shapes: playheadShapes() });
+  } else {
+    $('#scrub').value = 0;
+    $('#play-time').textContent = `${spanLabel(b - a)} á ${durationLabel(player.duration)}`;
+  }
+}
+
+function bindPlayback() {
+  $('#play').onclick = togglePlayback;
+  $('#play-stop').onclick = () => exitPlayback();
+  $('#scrub').oninput = (e) => seekPlayback(e.target.value / 1000);
+  $('#play-duration').onchange = (e) => {
+    player.duration = +e.target.value;
+    updatePlaybackUi();
+  };
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && player.active) return exitPlayback();
+    // Bilslá í reit eða á hnappi hefur sína eigin merkingu
+    if (e.key !== ' ' || state.view === 'table') return;
+    if (e.target instanceof Element && e.target.closest('input, select, textarea, button, [contenteditable]')) return;
+    e.preventDefault();
+    togglePlayback();
+  });
 }
 
 // ---------- Viðmót ----------
@@ -559,10 +852,12 @@ function setView(view) {
   state.view = view;
   for (const b of $$('.tabs [data-view]')) b.setAttribute('aria-selected', b.dataset.view === view);
   for (const id of ['map', '3d', 'table']) $(`#view-${id}`).hidden = id !== view;
+  $('#playbar').hidden = view === 'table';
   const list = visibleQuakes();
   const win = timeWindow();
   if (view === 'map') map.invalidateSize();
   if (view === '3d') render3d(list, win);
+  if (view === '3d' && player.active) renderPlayback3d();
   if (view === 'table') renderTable(list, win);
   writeUrl();
 }
@@ -621,6 +916,7 @@ function bindControls() {
     if (b) setView(b.dataset.view);
   };
   $('#brush-clear').onclick = clearBrush;
+  bindPlayback();
   $('#auto').onchange = () => {
     if ($('#auto').checked) tick();
     else checkStatus();
