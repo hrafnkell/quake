@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { parseCatalog, systemFor, windows, SIL_CUTOFF } from './catalog';
+import { parseArgs } from './backfill';
 
 const FEATURES = [
   { type: 'Feature', geometry: { type: 'Point', coordinates: [-19.240908, 63.709034] },
@@ -28,4 +29,11 @@ test('picks the system by date and splits chunks at the SIL cutoff', () => {
   const c = [...windows(SIL_CUTOFF - 86400, SIL_CUTOFF + 10 * 86400, 7 * 86400)];
   expect(c.map((x) => [x.system, (x.to - x.from) / 86400])).toEqual([['sil', 1], ['seiscomp', 7], ['seiscomp', 3]]);
   expect([...windows(0, 86400, 7 * 86400, 'seiscomp')]).toEqual([{ from: 0, to: 86400, system: 'seiscomp' }]);
+});
+
+test('backfill arguments: dates, --days and --chunk', () => {
+  expect(parseArgs(['2020-01-01', '2020-02-01'])).toMatchObject({ from: Date.UTC(2020, 0, 1) / 1000, to: Date.UTC(2020, 1, 1) / 1000, chunk: 7 * 86400 });
+  expect(parseArgs(['1991-01-07', '2020-01-01', '--chunk', '30'])).toMatchObject({ chunk: 30 * 86400 });
+  expect(parseArgs(['--chunk', '30', '--days', '10']).chunk).toBe(30 * 86400);
+  expect(() => parseArgs([])).toThrow();
 });

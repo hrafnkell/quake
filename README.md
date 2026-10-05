@@ -9,6 +9,8 @@ geymir þau í SQLite og birtir á korti, tímalínu, í 3D og í töflu.
 - `src/catalog.ts`: les skjálftaskrá Veðurstofunnar (api.vedur.is/quakes, sama heimild og skjalftalisa.vedur.is)
 - `src/backfill.ts`: bakfyllir grunninn úr skjálftaskránni, sjá neðar
 - `src/regions.ts`: svæði (rammar) og örnefni fyrir 3D sýn
+- `src/events.ts`: eldgos og stórir atburðir frá 1991, handskráðir; merki á tímalínu og korti og bókamerki
+  („Atburðir“) sem stilla svæði og tímabil á aðdragandann. Bættu við eða lagaðu að vild
 - `public/`: viðmót (Leaflet + Plotly frá CDN, engin bygging). Afspilun (▶ undir korti/3D, bilslá) birtir skjálfta
   tímabilsins í tímaröð á 30 s (stillanlegt); á kortinu er þá teiknað á canvas í stað Leaflet-merkja svo ár með
   tugþúsundum skjálfta renni mjúklega
@@ -83,7 +85,8 @@ og viðmótið gul merki á meðan. `FEED_URL` yfirskrifar slóð síðunnar (ti
 - `GET /api/quakes?region=reykjanes&from=<ms>&to=<ms>&minMag=&maxMag=`: dálkasnið (sjá `src/encode.ts`): hver reitur
   er fylki, tími sem mismunur í sekúndum, hnit ×1000, dýpt/stærð ×10, strengir sem vísar í `strings`. Helmingi minna
   þjappað en raðir og fljótara að lesa. `&format=rows` skilar hlutum (`t` í ms, `lat`, `lon`, `depth`, `mag`, `q`, `dist`, `dir`, `ref`, `region`).
-- `GET /api/regions`
+  Mest 100 000 skjálftar í svari; séu fleiri á tímabilinu eru þeir stærstu sendir og `total` segir heildarfjöldann.
+- `GET /api/regions`: svæði, örnefni og atburðir
 - `GET /api/status`: síðasta sókn, villur, fjöldi í grunni (`total` virkir, `withdrawn` felldir út), `catalog` (síðasta samstilling við skjálftaskrá)
 
 ## Uppsetning

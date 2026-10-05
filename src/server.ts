@@ -3,6 +3,7 @@ import { dirname, join, normalize } from 'node:path';
 import { fetchCatalog, windows } from './catalog';
 import { QuakeStore } from './db';
 import { encodeColumns, toRows } from './encode';
+import { EVENTS, validateEvents } from './events';
 import { DEFAULT_REGION, PLACES, REGIONS } from './regions';
 import { fetchFeed } from './scrape';
 
@@ -22,6 +23,7 @@ const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
 const store = new QuakeStore(DB_PATH);
+validateEvents();
 
 const status = {
   lastPoll: null as number | null,
@@ -145,13 +147,13 @@ function quakes(req: Request, url: URL) {
   const maxMag = numParam(url, 'maxMag', 10);
   if ([from, to, minMag, maxMag].some(Number.isNaN)) return json(req, { error: 'Ógild færibreyta' }, 400);
 
-  const rows = store.query({
+  const { rows, total } = store.query({
     from: Math.floor(from / 1000), to: Math.ceil(to / 1000),
     lat: region.lat, lon: region.lon, minMag, maxMag,
   });
-  // Dálkasnið sjálfgefið (sjá src/encode.ts), raðir með ?format=rows
-  if (url.searchParams.get('format') === 'rows') return json(req, { version: status.version, quakes: toRows(rows) });
-  return json(req, { version: status.version, ...encodeColumns(rows) });
+  // Dálkasnið sjálfgefið (sjá src/encode.ts), raðir með ?format=rows. total > n: stærstu skjálftarnir sýndir
+  if (url.searchParams.get('format') === 'rows') return json(req, { version: status.version, total, quakes: toRows(rows) });
+  return json(req, { version: status.version, total, ...encodeColumns(rows) });
 }
 
 // Útgáfunúmer (hash af innihaldi) á app.js og style.css í index.html. Cloudflare lætur vafra
@@ -187,7 +189,7 @@ const server = Bun.serve({
       case '/api/quakes':
         return quakes(req, url);
       case '/api/regions':
-        return json(req, { regions: REGIONS, places: PLACES, defaultRegion: DEFAULT_REGION });
+        return json(req, { regions: REGIONS, places: PLACES, defaultRegion: DEFAULT_REGION, events: EVENTS });
       case '/api/status':
         return json(req, { ...status, pollSeconds: POLL_SECONDS, ...store.stats() });
       default:

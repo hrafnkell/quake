@@ -28,7 +28,9 @@ const state = {
 let regions = [];
 let defaultRegion = 'island';
 let places = [];
+let events = []; // eldgos og stórir atburðir, úr /api/regions
 let quakes = [];
+let quakesTotal = 0; // fjöldi á tímabilinu; meiri en quakes.length ef þjónninn sýndi aðeins þá stærstu
 let dataFirst = null; // elsti skjálfti í grunni, ms (úr /api/status)
 let dataVersion = null;
 let lastFetch = 0;
@@ -181,6 +183,7 @@ async function loadQuakes({ quiet = false } = {}) {
     const data = await res.json();
     if (seq !== fetchSeq) return; // nýrri beiðni komin af stað
     quakes = decodeColumns(data);
+    quakesTotal = data.total ?? quakes.length;
     dataVersion = data.version;
     lastFetch = Date.now();
     render();
@@ -238,6 +241,7 @@ function render() {
   const win = timeWindow();
   renderStats(list);
   renderMap(list, win);
+  renderEvents(win);
   renderLegend(win);
   if (state.view === '3d') render3d(list, win);
   if (state.view === 'table') renderTable(list, win);
@@ -246,13 +250,93 @@ function render() {
   updatePlaybackUi();
 }
 
+// ---------- Atburðir: eldgos og stórir skjálftar ----------
+
+const KIND_LABEL = { eruption: 'Eldgos', earthquake: 'Skjálfti', intrusion: 'Kvikuhlaup' };
+const KIND_GROUP = { eruption: 'Eldgos', earthquake: 'Skjálftar og kvikuhlaup', intrusion: 'Skjálftar og kvikuhlaup' };
+
+// Atburðir sem snerta tímagluggann
+const eventsIn = (win) => events.filter((e) => e.startMs <= win[1] && e.endMs >= win[0]);
+
+function eventTitle(e) {
+  const when = e.endMs > e.startMs + 86400e3 ? `${fmtDate.format(e.startMs)} – ${fmtDate.format(e.endMs)}` : fmtDateTime.format(e.startMs);
+  return `${KIND_LABEL[e.kind]}: ${e.name}<br><span class="muted">${when}${e.note ? ' · ' + esc(e.note) : ''}</span>`;
+}
+
+function renderEventOptions() {
+  const groups = {};
+  for (const e of [...events].reverse()) (groups[KIND_GROUP[e.kind]] ??= []).push(e);
+  $('#events').innerHTML = '<option value="">Veldu atburð…</option>' + Object.entries(groups).map(([g, list]) =>
+    `<optgroup label="${esc(g)}">${list.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</optgroup>`).join('');
+}
+
+// Bókamerki: svæði atburðarins og tímabil sem nær yfir aðdragandann og fyrstu dagana
+function applyEvent(id) {
+  const e = events.find((x) => x.id === id);
+  if (!e) return;
+  const [before, after] = e.view ?? [30, 7];
+  state.region = regions.some((r) => r.id === e.region) ? e.region : defaultRegion;
+  state.preset = 'custom';
+  state.from = e.startMs - before * 86400e3;
+  state.to = Math.min(e.startMs + after * 86400e3, Date.now());
+  state.brush = null;
+  if (state.view === 'table') setView('map');
+  fitRegion();
+  filtersChanged();
+}
+
+let eventLayer;
+
+function renderEvents(win) {
+  eventLayer ??= L.layerGroup().addTo(map);
+  eventLayer.clearLayers();
+  for (const e of eventsIn(win)) {
+    const glyph = e.kind === 'eruption' ? '▲' : e.kind === 'intrusion' ? '◆' : '✶';
+    L.marker([e.lat, e.lon], {
+      icon: L.divIcon({ className: 'event-icon', html: `<span>${glyph}</span>`, iconSize: [20, 20], iconAnchor: [10, 10] }),
+      interactive: true,
+      keyboard: false,
+    }).bindTooltip(eventTitle(e), { className: 'quake-tip', direction: 'top', offset: [0, -10] }).addTo(eventLayer);
+  }
+}
+
+// Lóðréttar línur (og skyggt bil meðan eldgos stendur) á tímalínunni, með nafni efst
+function eventShapes(win) {
+  const color = css('--event');
+  const shapes = [], annotations = [];
+  for (const e of eventsIn(win)) {
+    const x0 = isoMs(e.startMs);
+    shapes.push({ type: 'line', xref: 'x', yref: 'paper', x0, x1: x0, y0: 0, y1: 1, line: { color, width: 1.5, dash: e.kind === 'eruption' ? 'solid' : 'dot' } });
+    if (e.endMs > e.startMs + 3600e3) {
+      shapes.push({ type: 'rect', xref: 'x', yref: 'paper', x0, x1: isoMs(e.endMs), y0: 0, y1: 1, fillcolor: color, opacity: 0.08, line: { width: 0 }, layer: 'below' });
+    }
+    annotations.push({
+      x: x0, xref: 'x', y: 1, yref: 'paper', yanchor: 'bottom', xanchor: 'left', yshift: 2, showarrow: false,
+      text: esc(e.name), font: { color, size: 11 }, hovertext: eventTitle(e).replace(/<[^>]+>/g, ' '),
+    });
+  }
+  return { shapes, annotations };
+}
+
+// Allar formlínur tímalínunnar: atburðir og afspilunarhausinn
+function timelineShapes(win = timeWindow()) {
+  const ev = eventShapes(win);
+  return { shapes: [...ev.shapes, ...playheadShapes()], annotations: ev.annotations };
+}
+
 function renderStats(list) {
   const biggest = list.reduce((m, q) => (!m || q.mag > m.mag ? q : m), null);
   const latest = list[list.length - 1];
   const strong = list.filter((q) => q.mag >= 3).length;
   const tile = (k, v, d = '') => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
+  // Þjónninn sýnir stærstu skjálftana þegar tímabilið er of stórt; segja frá því og hvar mörkin liggja
+  const thinned = quakesTotal > quakes.length && quakes.length;
+  const minShown = thinned ? Math.min(...quakes.map((q) => q.mag)) : null;
+  const countNote = thinned
+    ? `${quakes.length.toLocaleString('is-IS')} stærstu sýndir af ${quakesTotal.toLocaleString('is-IS')} (≥ M ${fmt1(minShown)})`
+    : strong ? `${strong} af stærð 3 eða meira` : 'enginn af stærð 3 eða meira';
   $('#stats').innerHTML = [
-    tile('Fjöldi skjálfta', list.length.toLocaleString('is-IS'), strong ? `${strong} af stærð 3 eða meira` : 'enginn af stærð 3 eða meira'),
+    tile('Fjöldi skjálfta', list.length.toLocaleString('is-IS'), countNote),
     biggest ? tile('Stærsti', `M ${fmt1(biggest.mag)}`, `${esc(place(biggest))} · ${ago(biggest.t)}`) : tile('Stærsti', '–'),
     latest ? tile('Nýjasti', ago(latest.t), `M ${fmt1(latest.mag)} · ${esc(place(latest))}`) : tile('Nýjasti', '–'),
   ].join('');
@@ -615,7 +699,8 @@ function renderTimeline(win) {
 
   const axis = { gridcolor: grid, zerolinecolor: grid, linecolor: grid };
   const layout = {
-    margin: { l: 44, r: 12, t: 8, b: 32 },
+    // Pláss efst fyrir nöfn atburða þegar þeir eru í glugganum
+    margin: { l: 44, r: 12, t: eventsIn(win).length ? 26 : 8, b: 32 },
     paper_bgcolor: 'transparent',
     plot_bgcolor: 'transparent',
     font: plotFont(),
@@ -628,7 +713,7 @@ function renderTimeline(win) {
     hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
     // Halda vali á tímabili þegar gögn uppfærast sjálfkrafa
     uirevision: `${state.region}|${state.preset}|${state.from}|${state.to}|${state.minMag}|${state.maxMag}`,
-    shapes: playheadShapes(),
+    ...timelineShapes(win),
     xaxis: { ...axis, type: 'date', range: state.brush ? undefined : [isoLocal(win[0]), isoLocal(win[1])] },
     yaxis: { ...axis, domain: [0, 0.68], title: { text: 'Stærð' }, fixedrange: true, rangemode: 'tozero' },
     yaxis2: { ...axis, domain: [0.76, 1], title: { text: 'Fjöldi' }, fixedrange: true, rangemode: 'tozero', tickformat: 'd', nticks: 3 },
@@ -967,7 +1052,7 @@ function exitPlayback({ rerender = true } = {}) {
   player.playing = false;
   cancelAnimationFrame(player.raf);
   player.active = false;
-  Plotly.relayout('timeline', { shapes: [] });
+  Plotly.relayout('timeline', timelineShapes());
   const list = visibleQuakes();
   const win = timeWindow();
   renderMap(list, win); // kyrrstæð sýn aftur á canvasið
@@ -1052,7 +1137,7 @@ function updatePlaybackUi() {
   if (player.active) {
     $('#scrub').value = Math.round(((player.t - a) / Math.max(b - a, 1)) * 1000);
     $('#play-time').textContent = fmtDateTime.format(player.t);
-    Plotly.relayout('timeline', { shapes: playheadShapes() });
+    Plotly.relayout('timeline', timelineShapes());
   } else {
     $('#scrub').value = 0;
     $('#play-time').textContent = `${spanLabel(b - a)} á ${durationLabel(player.duration)}`;
@@ -1117,6 +1202,10 @@ function bindControls() {
     fitRegion();
     filtersChanged();
   };
+  $('#events').onchange = (e) => {
+    applyEvent(e.target.value);
+    e.target.value = '';
+  };
   $('#presets').onclick = (e) => {
     const b = e.target.closest('[data-preset]');
     if (!b) return;
@@ -1164,9 +1253,11 @@ async function init() {
   const data = await (await fetch('/api/regions')).json();
   regions = data.regions;
   places = data.places;
+  events = (data.events ?? []).map((e) => ({ ...e, startMs: Date.parse(e.start), endMs: e.end ? Date.parse(e.end) : Date.parse(e.start) }));
   defaultRegion = data.defaultRegion;
   if (!regions.some((r) => r.id === state.region)) state.region = defaultRegion;
   $('#region').innerHTML = regions.map((r) => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
+  renderEventOptions();
   syncControls();
   bindControls();
   fitRegion();

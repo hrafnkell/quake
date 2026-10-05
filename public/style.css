@@ -10,6 +10,7 @@
   --bad: #c62828;
   --bar: #b9b4aa;
   --glacier: #7fb0dc;
+  --event: #b4178f;
   --radius: 10px;
   color-scheme: light;
 }
@@ -27,6 +28,7 @@
     --bad: #ef6b6b;
     --bar: #55534d;
     --glacier: #4f7ea8;
+    --event: #f06ad0;
     color-scheme: dark;
   }
 }
@@ -175,6 +177,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); 
 .playbar select { height: 30px; padding: 2px 6px; }
 .play-time { font-size: 0.8rem; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 9ch; text-align: right; }
 .quake-canvas { pointer-events: none; }
+
+/* Atburðir (eldgos o.fl.) á korti */
+.event-icon { color: var(--event); font-size: 18px; line-height: 1; text-shadow: 0 0 3px var(--surface), 0 0 6px var(--surface); text-align: center; }
+.event-icon span { display: block; transform: translateY(-2px); }
 
 .timeline-card { margin-top: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 8px 4px; }
 .card-head { display: flex; gap: 12px; align-items: baseline; padding: 0 8px; flex-wrap: wrap; }
