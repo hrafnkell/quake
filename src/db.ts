@@ -10,8 +10,40 @@ export type QuakeFilter = {
   maxMag: number;
 };
 
-const COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace, raw';
+export type Revision = Quake & { seenAt: number };
+
+export type UpsertOptions = {
+  // Tímabil sem færslurnar ná yfir, unix sekúndur [from, to). Raðir í grunni á tímabilinu sem vantar
+  // í færslurnar teljast horfnar. Sjálfgefið frá elstu færslu og áfram (straumurinn á vedur.is).
+  from?: number;
+  to?: number;
+  // Hver heimild fellir aðeins út það sem hún ein hefur sýnt:
+  // 'feed' (sjálfgefið): straumurinn á vedur.is skráir last_seen og fellir út raðir sem hann hefur sýnt
+  //   (last_seen) en vantar nú.
+  // 'catalog': skjálftaskráin sýnir skjálfta sem straumurinn sýnir ekki (neikvæð stærð, tvöfaldar
+  //   sjálfvirkar lausnir) og getur verið á eftir honum, svo hún snertir ekki last_seen og fellir aðeins
+  //   út sjálfvirkar raðir sem straumurinn hefur aldrei sýnt. Yfirfarinn skjálfti úr skránni afturkallar útfellingu.
+  source?: 'feed' | 'catalog';
+};
+
+const FIELDS = ['time', 'lat', 'lon', 'depth', 'mag', 'quality', 'distKm', 'direction', 'refPlace', 'region', 'eventId', 'raw'] as const;
+const CORE = ['time', 'lat', 'lon', 'depth', 'mag', 'quality'] as const;
+// Fjarlægð/stefna/örnefni koma aðeins úr straumnum, svæðisheiti aðeins úr skjálftaskrá; hvort tveggja
+// er aðeins borið saman og skrifað þegar uppruninn gefur það, svo heimildirnar yfirskrifi ekki hver aðra.
+const PLACE = ['distKm', 'direction', 'refPlace'] as const;
+const REV_COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace, raw';
+const COLUMNS = REV_COLUMNS.replace(', raw', ', region, event_id AS eventId, raw');
 export const MAX_ROWS = 50_000;
+
+// Sami skjálfti, lítillega endurmetinn (t.d. sjálfvirk endurstaðsetning þegar fleiri stöðvar skila gögnum).
+// Þröngt, því í hrinu geta margir skjálftar verið á sama bletti með stuttu millibili.
+const NEAR = { time: 3, lat: 0.05, lon: 0.1 };
+// Yfirfarinn skjálfti (gæði 90+) sem birtist í sömu sókn og sjálfvirka staðsetningin (gæði 50) hverfur.
+// Sjálfvirkri staðsetningu getur skeikað um tugi km og nokkrar sekúndur, svo hér er leitað víðar,
+// en aðeins meðal raða sem hurfu úr straumnum í þessari sókn.
+const REVISED = { time: 60, lat: 0.3, lon: 0.6 };
+
+type Row = Quake & { id: number; withdrawnAt: number | null; lastSeen: number | null };
 
 export class QuakeStore {
   db: Database;
@@ -19,66 +51,182 @@ export class QuakeStore {
   constructor(path: string) {
     this.db = new Database(path, { create: true });
     this.db.exec('PRAGMA journal_mode = WAL');
+    // Bakfylling og þjónn skrifa í sama grunn; bíða eftir hinum frekar en að fá "database is locked"
+    this.db.exec('PRAGMA busy_timeout = 10000');
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS quakes (
-        id         INTEGER PRIMARY KEY,
-        time       INTEGER NOT NULL,
-        lat        REAL NOT NULL,
-        lon        REAL NOT NULL,
-        depth      REAL NOT NULL,
-        mag        REAL NOT NULL,
-        quality    REAL,
-        dist_km    REAL,
-        direction  TEXT,
-        ref_place  TEXT,
-        first_seen INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        id           INTEGER PRIMARY KEY,
+        time         INTEGER NOT NULL,
+        lat          REAL NOT NULL,
+        lon          REAL NOT NULL,
+        depth        REAL NOT NULL,
+        mag          REAL NOT NULL,
+        quality      REAL,
+        dist_km      REAL,
+        direction    TEXT,
+        ref_place    TEXT,
+        raw          TEXT,
+        region       TEXT,
+        event_id     TEXT,
+        first_seen   INTEGER NOT NULL,
+        updated_at   INTEGER NOT NULL,
+        last_seen    INTEGER,
+        withdrawn_at INTEGER
       );
       CREATE INDEX IF NOT EXISTS quakes_time ON quakes(time);
+      CREATE TABLE IF NOT EXISTS revisions (
+        id        INTEGER PRIMARY KEY,
+        quake_id  INTEGER NOT NULL REFERENCES quakes(id),
+        seen_at   INTEGER NOT NULL,
+        time      INTEGER NOT NULL,
+        lat       REAL NOT NULL,
+        lon       REAL NOT NULL,
+        depth     REAL NOT NULL,
+        mag       REAL NOT NULL,
+        quality   REAL,
+        dist_km   REAL,
+        direction TEXT,
+        ref_place TEXT,
+        raw       TEXT
+      );
+      CREATE INDEX IF NOT EXISTS revisions_quake ON revisions(quake_id);
     `);
-    const cols = this.db.query<{ name: string }, []>('PRAGMA table_info(quakes)').all().map((c) => c.name);
-    if (!cols.includes('raw')) this.db.exec('ALTER TABLE quakes ADD COLUMN raw TEXT');
+    this.migrate();
   }
 
-  // Veðurstofan endurmetur skjálfta (staðsetning/stærð breytist lítillega), svo sami
-  // skjálfti er fundinn eftir nálægð í tíma og rúmi frekar en nákvæmri samsvörun.
-  upsert(quakes: Quake[]) {
-    const find = this.db.query<Quake & { id: number }, [number, number, number]>(`
-      SELECT id, ${COLUMNS} FROM quakes
-      WHERE time BETWEEN ?1 - 3 AND ?1 + 3 AND abs(lat - ?2) < 0.05 AND abs(lon - ?3) < 0.1
-      ORDER BY abs(time - ?1) LIMIT 1`);
-    const insert = this.db.query(`
-      INSERT INTO quakes (time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, raw, first_seen, updated_at)
-      VALUES ($time, $lat, $lon, $depth, $mag, $quality, $distKm, $direction, $refPlace, $raw, $now, $now)`);
+  private migrate() {
+    const cols = this.db.query<{ name: string }, []>('PRAGMA table_info(quakes)').all().map((c) => c.name);
+    if (!cols.includes('raw')) this.db.exec('ALTER TABLE quakes ADD COLUMN raw TEXT');
+    if (!cols.includes('last_seen')) {
+      this.db.exec('ALTER TABLE quakes ADD COLUMN last_seen INTEGER');
+      this.db.exec('UPDATE quakes SET last_seen = updated_at');
+    }
+    if (!cols.includes('withdrawn_at')) this.db.exec('ALTER TABLE quakes ADD COLUMN withdrawn_at INTEGER');
+    if (!cols.includes('region')) this.db.exec('ALTER TABLE quakes ADD COLUMN region TEXT');
+    if (!cols.includes('event_id')) this.db.exec('ALTER TABLE quakes ADD COLUMN event_id TEXT');
+    this.db.exec('CREATE INDEX IF NOT EXISTS quakes_event ON quakes(event_id)');
+    // Raðir frá því áður en saga var geymd fá núverandi gildi sem fyrstu útgáfu
+    this.db.exec(`
+      INSERT INTO revisions (quake_id, seen_at, time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, raw)
+      SELECT id, updated_at, time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, raw FROM quakes
+      WHERE id NOT IN (SELECT quake_id FROM revisions)`);
+  }
+
+  // Straumurinn frá vedur.is er heildarlisti síðustu ~48 klst. Veðurstofan yfirfer sjálfvirkar
+  // staðsetningar (gæði 50) eftir á: þá breytast tími, staður, dýpi og stærð, gæði verða 90+,
+  // og rangar sjálfvirkar greiningar eru felldar út. Því er hver röð rakin á þrjá vegu:
+  //  1. Færsla sem er nánast eins og röð í grunni uppfærir hana (smávægileg endurmat).
+  //  2. Ný færsla sem birtist um leið og röð í grunni hverfur úr straumnum, nálægt í tíma og rúmi,
+  //     er sami skjálfti endurmetinn: röðin er uppfærð frekar en að tvítaka skjálftann.
+  //  3. Röð sem hverfur úr straumnum án þess að nokkuð komi í staðinn er merkt felld út
+  //     (withdrawn_at) og birtist ekki, en merkið er hreinsað ef hún kemur aftur.
+  // Allar útgáfur eru geymdar í revisions.
+  // Færslur úr skjálftaskrá bera auðkenni (eventId) sem gengur fyrir nálægðarleit.
+  upsert(quakes: Quake[], now = Math.floor(Date.now() / 1000), opts: UpsertOptions = {}) {
+    const counts = { inserted: 0, updated: 0, withdrawn: 0 };
+    if (quakes.length === 0) return counts;
+    const feed = (opts.source ?? 'feed') === 'feed';
+
+    const byEvent = this.db.query<Row, [string]>(`
+      SELECT id, withdrawn_at AS withdrawnAt, ${COLUMNS} FROM quakes WHERE event_id = ?1`);
+    const findNear = this.db.query<Row, [number, number, number]>(`
+      SELECT id, withdrawn_at AS withdrawnAt, ${COLUMNS} FROM quakes
+      WHERE time BETWEEN ?1 - ${NEAR.time} AND ?1 + ${NEAR.time}
+        AND abs(lat - ?2) < ${NEAR.lat} AND abs(lon - ?3) < ${NEAR.lon}
+      ORDER BY abs(time - ?1) LIMIT 5`);
+    const expected = this.db.query<Row, [number, number]>(`
+      SELECT id, withdrawn_at AS withdrawnAt, last_seen AS lastSeen, ${COLUMNS} FROM quakes
+      WHERE time >= ?1 AND time < ?2 AND withdrawn_at IS NULL`);
+    const insert = this.db.query<{ id: number }, Record<string, unknown>>(`
+      INSERT INTO quakes (time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, region, event_id, raw, first_seen, updated_at, last_seen)
+      VALUES ($time, $lat, $lon, $depth, $mag, $quality, $distKm, $direction, $refPlace, $region, $eventId, $raw, $now, $now, $lastSeen)
+      RETURNING id`);
     const update = this.db.query(`
       UPDATE quakes SET time = $time, lat = $lat, lon = $lon, depth = $depth, mag = $mag, quality = $quality,
-        dist_km = $distKm, direction = $direction, ref_place = $refPlace, raw = $raw, updated_at = $now
+        dist_km   = CASE WHEN $refPlace IS NULL THEN dist_km   ELSE $distKm    END,
+        direction = CASE WHEN $refPlace IS NULL THEN direction ELSE $direction END,
+        ref_place = COALESCE($refPlace, ref_place),
+        region    = COALESCE($region, region),
+        event_id  = COALESCE($eventId, event_id),
+        raw = $raw, updated_at = $now,
+        last_seen    = COALESCE($lastSeen, last_seen),
+        withdrawn_at = CASE WHEN $lastSeen IS NOT NULL OR $quality >= 90 THEN NULL ELSE withdrawn_at END
       WHERE id = $id`);
+    const touch = this.db.query('UPDATE quakes SET last_seen = $now, withdrawn_at = NULL WHERE id = $id');
+    const withdraw = this.db.query('UPDATE quakes SET withdrawn_at = $now WHERE id = $id');
+    const revision = this.db.query(`
+      INSERT INTO revisions (quake_id, seen_at, time, lat, lon, depth, mag, quality, dist_km, direction, ref_place, raw)
+      VALUES ($id, $now, $time, $lat, $lon, $depth, $mag, $quality, $distKm, $direction, $refPlace, $raw)`);
 
-    const fields = ['time', 'lat', 'lon', 'depth', 'mag', 'quality', 'distKm', 'direction', 'refPlace', 'raw'] as const;
-    let inserted = 0, updated = 0;
-    const now = Math.floor(Date.now() / 1000);
+    const lastSeen = feed ? now : null;
+    const params = (q: Quake) => ({ ...Object.fromEntries(FIELDS.map((k) => ['$' + k, q[k] ?? null])), $lastSeen: lastSeen });
+    const changed = (row: Quake, q: Quake) =>
+      CORE.some((k) => row[k] !== q[k]) ||
+      (q.refPlace != null && PLACE.some((k) => row[k] !== q[k])) ||
+      (q.region != null && row.region !== q.region);
+    const downgrade = (row: Quake, q: Quake) => (row.quality ?? 0) >= 90 && (q.quality ?? 0) < 90;
+    // Hver heimild fellir aðeins út það sem hún ein hefur sýnt, sjá UpsertOptions
+    const canWithdraw = (r: Row) => (feed ? r.lastSeen != null : r.lastSeen == null && (r.quality ?? 0) < 90);
+    const from = opts.from ?? quakes.reduce((m, q) => Math.min(m, q.time), Infinity);
+    const to = opts.to ?? Number.MAX_SAFE_INTEGER;
 
     this.db.transaction(() => {
+      const seen = new Set<number>();
+      const fresh: Quake[] = [];
       for (const q of quakes) {
-        const params = Object.fromEntries(fields.map((k) => ['$' + k, q[k]]));
-        const existing = find.get(q.time, q.lat, q.lon);
-        if (!existing) {
-          insert.run({ ...params, $now: now });
-          inserted++;
-        } else if (fields.some((k) => existing[k] !== q[k])) {
-          update.run({ ...params, $now: now, $id: existing.id });
-          updated++;
+        // Tveir skjálftar í sömu færslum geta ekki verið sama röðin (tvíburar með 1–2 s millibili)
+        let hit = q.eventId ? byEvent.get(q.eventId) : null;
+        if (!hit || seen.has(hit.id)) hit = findNear.all(q.time, q.lat, q.lon).find((r) => !seen.has(r.id)) ?? null;
+        if (!hit) {
+          fresh.push(q);
+          continue;
+        }
+        seen.add(hit.id);
+        // Yfirfarin gildi víkja ekki fyrir sjálfvirkum: skjálftaskráin getur verið á eftir straumnum
+        if (changed(hit, q) && !downgrade(hit, q)) {
+          update.run({ ...params(q), $now: now, $id: hit.id });
+          revision.run({ ...params(q), $now: now, $id: hit.id });
+          counts.updated++;
+        } else if (feed) {
+          touch.run({ $now: now, $id: hit.id });
         }
       }
+
+      // Raðir á tímabilinu sem færslurnar náðu ekki til: endurmetnar undir öðrum tíma/stað, eða horfnar
+      const gone = expected.all(from, to).filter((r) => !seen.has(r.id));
+      for (const q of fresh.sort((a, b) => a.time - b.time)) {
+        let best = -1;
+        for (let i = 0; i < gone.length; i++) {
+          const r = gone[i];
+          if (downgrade(r, q)) continue;
+          if (Math.abs(r.time - q.time) > REVISED.time || Math.abs(r.lat - q.lat) >= REVISED.lat || Math.abs(r.lon - q.lon) >= REVISED.lon) continue;
+          if (best < 0 || Math.abs(r.time - q.time) < Math.abs(gone[best].time - q.time)) best = i;
+        }
+        if (best >= 0) {
+          const [r] = gone.splice(best, 1);
+          update.run({ ...params(q), $now: now, $id: r.id });
+          revision.run({ ...params(q), $now: now, $id: r.id });
+          counts.updated++;
+        } else {
+          const { id } = insert.get({ ...params(q), $now: now })!;
+          revision.run({ ...params(q), $now: now, $id: id });
+          counts.inserted++;
+        }
+      }
+      for (const r of gone) {
+        if (!canWithdraw(r)) continue;
+        withdraw.run({ $now: now, $id: r.id });
+        counts.withdrawn++;
+      }
     })();
-    return { inserted, updated };
+    return counts;
   }
 
   query(f: QuakeFilter): Quake[] {
     return this.db.query<Quake, Record<string, number>>(`
       SELECT ${COLUMNS} FROM quakes
-      WHERE time BETWEEN $from AND $to
+      WHERE withdrawn_at IS NULL
+        AND time BETWEEN $from AND $to
         AND lat BETWEEN $latMin AND $latMax AND lon BETWEEN $lonMin AND $lonMax
         AND mag BETWEEN $minMag AND $maxMag
       ORDER BY time DESC LIMIT ${MAX_ROWS}`).all({
@@ -88,8 +236,19 @@ export class QuakeStore {
     }).reverse();
   }
 
+  // Allar útgáfur skjálfta sem er nú (eða var) með gefin gildi, elsta fyrst
+  history(q: Pick<Quake, 'time' | 'lat' | 'lon'>): Revision[] {
+    return this.db.query<Revision, [number, number, number]>(`
+      SELECT seen_at AS seenAt, ${REV_COLUMNS} FROM revisions
+      WHERE quake_id = (SELECT id FROM quakes WHERE time = ?1 AND lat = ?2 AND lon = ?3 ORDER BY withdrawn_at IS NOT NULL LIMIT 1)
+      ORDER BY seen_at, id`).all(q.time, q.lat, q.lon);
+  }
+
   stats() {
-    return this.db.query<{ total: number; first: number | null; lastChange: number | null }, []>(
-      'SELECT count(*) AS total, min(time) AS first, max(updated_at) AS lastChange FROM quakes').get()!;
+    return this.db.query<{ total: number; withdrawn: number; first: number | null; lastChange: number | null }, []>(`
+      SELECT count(*) FILTER (WHERE withdrawn_at IS NULL) AS total,
+             count(*) FILTER (WHERE withdrawn_at IS NOT NULL) AS withdrawn,
+             min(time) AS first, max(updated_at) AS lastChange
+      FROM quakes`).get()!;
   }
 }

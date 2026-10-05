@@ -8,7 +8,9 @@ export type Quake = {
   distKm: number | null;
   direction: string | null;
   refPlace: string | null;
-  raw: string; // allir reitir eins og vedur.is gefur þá, sem JSON
+  region?: string | null; // skjálftasvæði úr skjálftaskrá (api.vedur.is), ekki í straumnum
+  eventId?: string | null; // auðkenni í skjálftaskrá, ekki í straumnum
+  raw: string; // allir reitir eins og uppruninn gefur þá, sem JSON
 };
 
 const URL = 'https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar';

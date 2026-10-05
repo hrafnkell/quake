@@ -1,5 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
+import { fetchCatalog, windows } from './catalog';
 import { QuakeStore } from './db';
 import { DEFAULT_REGION, PLACES, REGIONS } from './regions';
 import { fetchFeed } from './scrape';
@@ -8,6 +9,10 @@ const PORT = Number(process.env.PORT ?? 3000);
 const HOST = process.env.HOST ?? '127.0.0.1';
 const DB_PATH = process.env.DB_PATH ?? 'data/quakes.db';
 const POLL_SECONDS = Number(process.env.POLL_SECONDS ?? 300);
+// Samstilling við skjálftaskrá: síðustu CATALOG_SYNC_DAYS dagar á CATALOG_SYNC_HOURS fresti (0 = slökkt).
+// Ein lítil beiðni á nokkurra klukkustunda fresti, svo yfirferð Veðurstofunnar skili sér þótt hún komi dögum síðar.
+const CATALOG_SYNC_HOURS = Number(process.env.CATALOG_SYNC_HOURS ?? 6);
+const CATALOG_SYNC_DAYS = Number(process.env.CATALOG_SYNC_DAYS ?? 14);
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -19,17 +24,18 @@ const status = {
   lastError: null as string | null,
   // Breytist þegar ný gögn koma inn, viðmótið sækir þá aftur
   version: store.stats().lastChange ?? 0,
+  catalog: { lastSync: null as number | null, lastError: null as string | null, nextSync: null as number | null },
 };
 
 async function poll() {
   try {
     const quakes = await fetchFeed();
     if (quakes.length === 0) throw new Error('Engir skjálftar fundust, er sniðið á vedur.is breytt?');
-    const { inserted, updated } = store.upsert(quakes);
-    if (inserted || updated) status.version = Date.now();
+    const { inserted, updated, withdrawn } = store.upsert(quakes);
+    if (inserted || updated || withdrawn) status.version = Date.now();
     status.lastOk = Date.now();
     status.lastError = null;
-    console.log(`${new Date().toISOString()} ${quakes.length} í straumi, ${inserted} nýir, ${updated} uppfærðir`);
+    console.log(`${new Date().toISOString()} ${quakes.length} í straumi, ${inserted} nýir, ${updated} uppfærðir, ${withdrawn} felldir út`);
   } catch (e) {
     status.lastError = e instanceof Error ? e.message : String(e);
     console.error(`${new Date().toISOString()} Villa við sókn: ${status.lastError}`);
@@ -38,8 +44,38 @@ async function poll() {
   }
 }
 
+async function syncCatalog() {
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - CATALOG_SYNC_DAYS * 86400;
+  try {
+    let inserted = 0, updated = 0, fetched = 0;
+    for (const w of windows(from, to, Infinity)) {
+      const quakes = await fetchCatalog(w.from, w.to, w.system);
+      const r = store.upsert(quakes, undefined, { from: w.from, to: w.to, source: 'catalog' });
+      fetched += quakes.length; inserted += r.inserted; updated += r.updated;
+    }
+    if (inserted || updated) status.version = Date.now();
+    status.catalog.lastSync = Date.now();
+    status.catalog.lastError = null;
+    console.log(`${new Date().toISOString()} skjálftaskrá ${CATALOG_SYNC_DAYS} d: ${fetched} í skrá, ${inserted} nýir, ${updated} uppfærðir`);
+  } catch (e) {
+    status.catalog.lastError = e instanceof Error ? e.message : String(e);
+    console.error(`${new Date().toISOString()} Villa við samstillingu við skjálftaskrá: ${status.catalog.lastError}`);
+  } finally {
+    status.catalog.nextSync = CATALOG_SYNC_HOURS > 0 ? Date.now() + CATALOG_SYNC_HOURS * 3600e3 : null;
+  }
+}
+
 poll();
 setInterval(poll, POLL_SECONDS * 1000);
+if (CATALOG_SYNC_HOURS > 0) {
+  // Fyrsta samstilling skömmu eftir ræsingu (fyllir í eyður eftir niðritíma), svo reglulega
+  setTimeout(() => {
+    syncCatalog();
+    setInterval(syncCatalog, CATALOG_SYNC_HOURS * 3600e3);
+  }, 60_000);
+  status.catalog.nextSync = Date.now() + 60_000;
+}
 
 function json(req: Request, data: unknown, httpStatus = 200) {
   const body = JSON.stringify(data);
@@ -78,7 +114,7 @@ function quakes(req: Request, url: URL) {
     version: status.version,
     quakes: rows.map((q) => ({
       t: q.time * 1000, lat: q.lat, lon: q.lon, depth: q.depth, mag: q.mag,
-      q: q.quality, dist: q.distKm, dir: q.direction, ref: q.refPlace,
+      q: q.quality, dist: q.distKm, dir: q.direction, ref: q.refPlace, region: q.region,
     })),
   });
 }

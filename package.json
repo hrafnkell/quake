@@ -5,6 +5,7 @@
   "scripts": {
     "start": "bun run src/server.ts",
     "dev": "bun --watch run src/server.ts",
+    "backfill": "bun run src/backfill.ts",
     "test": "bun test"
   }
 }
