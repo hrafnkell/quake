@@ -191,7 +191,10 @@ async function loadQuakes({ quiet = false } = {}) {
 async function checkStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
-    if (s.lastError) {
+    if (s.source === 'catalog') {
+      // Varaleið: vedur.is svarar ekki en skjálftaskráin heldur kortinu lifandi
+      setStatus(`Uppfært kl ${fmtClock.format(s.lastOk)} úr skjálftaskrá · vedur.is svarar ekki`, 'warn');
+    } else if (s.lastError) {
       setStatus(`Villa við sókn til vedur.is: ${s.lastError}`, 'bad');
     } else {
       const auto = $('#auto').checked;

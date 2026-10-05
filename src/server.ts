@@ -14,6 +14,10 @@ const POLL_SECONDS = Number(process.env.POLL_SECONDS ?? 300);
 // Ein lítil beiðni á nokkurra klukkustunda fresti, svo yfirferð Veðurstofunnar skili sér þótt hún komi dögum síðar.
 const CATALOG_SYNC_HOURS = Number(process.env.CATALOG_SYNC_HOURS ?? 6);
 const CATALOG_SYNC_DAYS = Number(process.env.CATALOG_SYNC_DAYS ?? 14);
+// Varaleið: þegar sókn á vedur.is bregst svona oft í röð er skjálftaskráin sótt í staðinn (síðustu 48 klst)
+// í hverri sókn, þar til síðan svarar aftur. Heldur kortinu lifandi þótt síðan breytist eða hverfi.
+const FEED_FALLBACK_AFTER = Number(process.env.FEED_FALLBACK_AFTER ?? 3);
+const FALLBACK_HOURS = 48;
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -23,12 +27,18 @@ const status = {
   lastPoll: null as number | null,
   lastOk: null as number | null,
   lastError: null as string | null,
+  source: 'feed' as 'feed' | 'catalog', // hvaðan síðustu gögn komu
+  feedFailures: 0, // misheppnaðar sóknir á vedur.is í röð
   // Breytist þegar ný gögn koma inn, viðmótið sækir þá aftur
   version: store.stats().lastChange ?? 0,
   catalog: { lastSync: null as number | null, lastError: null as string | null, nextSync: null as number | null },
 };
 
+let polling = false;
+
 async function poll() {
+  if (polling) return; // fyrri sókn (t.d. varaleið með endurtekningum) enn í gangi
+  polling = true;
   try {
     const quakes = await fetchFeed();
     if (quakes.length === 0) throw new Error('Engir skjálftar fundust, er sniðið á vedur.is breytt?');
@@ -36,12 +46,40 @@ async function poll() {
     if (inserted || updated || withdrawn) status.version = Date.now();
     status.lastOk = Date.now();
     status.lastError = null;
+    if (status.source !== 'feed') console.log(`${new Date().toISOString()} vedur.is svarar aftur, hætt að nota varaleið`);
+    status.source = 'feed';
+    status.feedFailures = 0;
     console.log(`${new Date().toISOString()} ${quakes.length} í straumi, ${inserted} nýir, ${updated} uppfærðir, ${withdrawn} felldir út`);
   } catch (e) {
     status.lastError = e instanceof Error ? e.message : String(e);
-    console.error(`${new Date().toISOString()} Villa við sókn: ${status.lastError}`);
+    status.feedFailures++;
+    console.error(`${new Date().toISOString()} Villa við sókn (${status.feedFailures}. í röð): ${status.lastError}`);
+    if (status.feedFailures >= FEED_FALLBACK_AFTER) await pollCatalogFallback();
   } finally {
     status.lastPoll = Date.now();
+    polling = false;
+  }
+}
+
+// Skjálftaskráin í stað straumsins: sömu skjálftar (auk neikvæðra stærða), en yfirferð skilar sér seinna
+// og örnefnalýsingu vantar. Fellir ekkert út sem straumurinn hefur sýnt, sjá UpsertOptions.
+async function pollCatalogFallback() {
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - FALLBACK_HOURS * 3600;
+  try {
+    let fetched = 0, inserted = 0, updated = 0, withdrawn = 0;
+    for (const w of windows(from, to, Infinity)) {
+      const quakes = await fetchCatalog(w.from, w.to, w.system);
+      const r = store.upsert(quakes, undefined, { from: w.from, to: w.to, source: 'catalog' });
+      fetched += quakes.length; inserted += r.inserted; updated += r.updated; withdrawn += r.withdrawn;
+    }
+    if (inserted || updated || withdrawn) status.version = Date.now();
+    status.lastOk = Date.now();
+    if (status.source !== 'catalog') console.log(`${new Date().toISOString()} Varaleið: sæki skjálftaskrána í stað vedur.is`);
+    status.source = 'catalog';
+    console.log(`${new Date().toISOString()} skjálftaskrá ${FALLBACK_HOURS} klst (varaleið): ${fetched} í skrá, ${inserted} nýir, ${updated} uppfærðir, ${withdrawn} felldir út`);
+  } catch (e) {
+    console.error(`${new Date().toISOString()} Varaleið brást líka: ${e instanceof Error ? e.message : e}`);
   }
 }
 

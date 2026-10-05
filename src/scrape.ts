@@ -13,7 +13,8 @@ export type Quake = {
   raw: string; // allir reitir eins og uppruninn gefur þá, sem JSON
 };
 
-const URL = 'https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar';
+// FEED_URL má yfirskrifa til prófunar (t.d. ónýt slóð til að reyna varaleiðina)
+const URL = process.env.FEED_URL ?? 'https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar';
 
 export async function fetchFeed(): Promise<Quake[]> {
   const res = await fetch(URL, {

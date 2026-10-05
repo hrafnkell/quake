@@ -74,6 +74,9 @@ bun test
 Stillingar með umhverfisbreytum: `PORT` (3000), `HOST` (127.0.0.1), `DB_PATH` (`data/quakes.db`), `POLL_SECONDS` (300),
 `CATALOG_SYNC_HOURS` (6, 0 slekkur) og `CATALOG_SYNC_DAYS` (14): þjónninn samstillir síðustu daga við skjálftaskrána
 (sjá neðar) mínútu eftir ræsingu og svo reglulega, svo yfirferð Veðurstofunnar skili sér þótt hún komi dögum síðar.
+`FEED_FALLBACK_AFTER` (3): bregðist sókn á vedur.is svona oft í röð (t.d. síðan breytt eða horfin) er skjálftaskráin
+sótt í staðinn fyrir síðustu 48 klst í hverri sókn, þar til síðan svarar aftur; `/api/status` sýnir `source: "catalog"`
+og viðmótið gul merki á meðan. `FEED_URL` yfirskrifar slóð síðunnar (til prófunar).
 
 ## API
 
