@@ -223,6 +223,9 @@ async function loadQuakes({ quiet = false } = {}) {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? res.statusText);
     const data = await res.json();
     if (seq !== fetchSeq) return; // nýrri beiðni komin af stað
+    // Sjálfvirk uppfærsla sem lendir í miðri afspilun er látin bíða: dataVersion helst óbreytt, svo
+    // næsta athugun eftir afspilun sækir aftur. Beiðnir notandans (síur, tímalína) stöðva afspilun.
+    if (quiet && player.active) return;
     quakes = decodeColumns(data);
     quakesTotal = data.total ?? quakes.length;
     dataVersion = data.version;
@@ -314,7 +317,7 @@ const eventsIn = (win) => events.filter((e) => e.startMs <= win[1] && e.endMs >=
 
 function eventTitle(e) {
   const when = e.endMs > e.startMs + 86400e3 ? `${fmtDate.format(e.startMs)} – ${fmtDate.format(e.endMs)}` : fmtDateTime.format(e.startMs);
-  return `${KIND_LABEL[e.kind]}: ${e.name}<br><span class="muted">${when}${e.note ? ' · ' + esc(e.note) : ''}</span>`;
+  return `${KIND_LABEL[e.kind]}: ${esc(e.name)}<br><span class="muted">${when}${e.note ? ' · ' + esc(e.note) : ''}</span>`;
 }
 
 function renderEventOptions() {
@@ -449,6 +452,7 @@ function initMapControls() {
   legendControl = L.control({ position: 'bottomright' });
   legendControl.onAdd = () => L.DomUtil.create('div', 'legend');
   legendControl.addTo(map);
+  quakeLayer.onDensityMax = () => renderLegend(player.active ? player.range : timeWindow());
 
   const toggle = L.control({ position: 'topleft' });
   toggle.onAdd = () => {
@@ -616,7 +620,10 @@ const QuakeCanvas = L.Layer.extend({
     let max = 1;
     for (const b of bins.values()) if (b.n > max) max = b.n;
     this._bins = bins;
+    // Hámarkið breytist við þysjun, færslu og afspilun; skýringin þarf þá að fylgja
+    const changed = max !== this._binMax;
     this._binMax = max;
+    if (changed) this.onDensityMax?.();
     const lut = Array.from({ length: 33 }, (_, i) => `rgb(${rampColor(i / 32, DENSITY_RAMPS).join(',')})`);
     ctx.globalAlpha = 0.85;
     for (const b of bins.values()) {
@@ -913,7 +920,8 @@ function renderTimeline(win) {
     // Halda vali á tímabili þegar gögn uppfærast sjálfkrafa
     uirevision: `${state.region}|${state.preset}|${state.from}|${state.to}|${state.minMag}|${state.maxMag}`,
     ...timelineShapes(win),
-    xaxis: { ...axis, type: 'date', range: state.brush ? undefined : [isoLocal(win[0]), isoLocal(win[1])] },
+    // Alltaf skýrt bil: án þess sýnir Plotly öll gögn þegar uirevision breytist en kortið er síað á valið
+    xaxis: { ...axis, type: 'date', range: (state.brush ?? win).map(isoLocal) },
     yaxis: { ...axis, domain: [0, 0.68], title: { text: 'Stærð' }, fixedrange: true, rangemode: 'tozero' },
     yaxis2: { ...axis, domain: [0.76, 1], title: { text: 'Fjöldi' }, fixedrange: true, rangemode: 'tozero', tickformat: 'd', nticks: 3 },
   };
@@ -1116,7 +1124,7 @@ function render3d(list, win, shown = list, at) {
     x: shown.map((q) => q.lon),
     y: shown.map((q) => q.lat),
     z: shown.map((q) => q.depth),
-    customdata: shown.map((q) => [q.mag, fmtDateTime.format(q.t), place(q)]),
+    customdata: shown.map((q) => [shownMag(q), fmtDateTime.format(q.t), esc(place(q))]),
     hovertemplate: '<b>M %{customdata[0]:.1f}</b><br>Dýpt: %{z:.1f} km<br>%{customdata[1]}<br>%{customdata[2]}<extra></extra>',
     marker: {
       size: styles.map((s) => clamp(s.radius * 0.9, 2, 30)),
