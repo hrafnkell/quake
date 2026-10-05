@@ -19,6 +19,9 @@ const CATALOG_SYNC_DAYS = Number(process.env.CATALOG_SYNC_DAYS ?? 14);
 // í hverri sókn, þar til síðan svarar aftur. Heldur kortinu lifandi þótt síðan breytist eða hverfi.
 const FEED_FALLBACK_AFTER = Number(process.env.FEED_FALLBACK_AFTER ?? 3);
 const FALLBACK_HOURS = 48;
+// Lengsta tímabil í einni beiðni á /api/quakes. Fyrirspurn yfir öll ár tók 2–3 s og stöðvaði þjóninn
+// á meðan (bun:sqlite er samstillt); viðmótið takmarkar sig við það sama (MAX_SPAN í app.js).
+const MAX_SPAN_DAYS = 366;
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 mkdirSync(dirname(DB_PATH), { recursive: true });
@@ -146,6 +149,8 @@ function quakes(req: Request, url: URL) {
   const minMag = numParam(url, 'minMag', -10);
   const maxMag = numParam(url, 'maxMag', 10);
   if ([from, to, minMag, maxMag].some(Number.isNaN)) return json(req, { error: 'Ógild færibreyta' }, 400);
+  // Smá svigrúm fyrir klukkuskekkju og "til" sem viðmótið setur aðeins fram í tímann
+  if (to - from > (MAX_SPAN_DAYS + 1) * 86400e3) return json(req, { error: `Tímabil má mest vera ${MAX_SPAN_DAYS} dagar` }, 400);
 
   const { rows, total } = store.query({
     from: Math.floor(from / 1000), to: Math.ceil(to / 1000),

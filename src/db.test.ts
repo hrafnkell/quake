@@ -2,6 +2,12 @@ import { expect, test } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { QuakeStore } from './db';
 import type { Quake } from './scrape';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// Tímabundin mappa fyrir próf sem þurfa grunn á diski (flutningur á eldri gagnaskipun)
+const tmp = mkdtempSync(join(tmpdir(), 'quake-test-'));
 
 const T0 = Date.UTC(2026, 9, 4, 15, 10, 1) / 1000;
 const ALL = { from: 0, to: 2e9, lat: [60, 70] as [number, number], lon: [-30, 0] as [number, number], minMag: -10, maxMag: 10 };
@@ -80,7 +86,7 @@ test('a genuinely new quake far from any vanished row is inserted', () => {
 });
 
 test('migrates a database from before revisions were tracked', () => {
-  const path = `/tmp/claude-1000/-home-keli-code/56c16b42-2636-4e75-90dc-1ad9618067da/scratchpad/migrate-${Date.now()}.db`;
+  const path = `${tmp}/migrate.db`;
   const old = new Database(path, { create: true });
   old.exec(`
     CREATE TABLE quakes (id INTEGER PRIMARY KEY, time INTEGER NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL, depth REAL NOT NULL,
@@ -182,7 +188,7 @@ test('a reviewed catalogue entry restores a withdrawn row, an automatic one does
 });
 
 test('schema v1 databases drop the duplicated current revision once', () => {
-  const path = `/tmp/claude-1000/-home-keli-code/56c16b42-2636-4e75-90dc-1ad9618067da/scratchpad/v1-${Date.now()}.db`;
+  const path = `${tmp}/v1.db`;
   const v1 = new QuakeStore(path);
   v1.db.exec('PRAGMA user_version = 1');
   v1.upsert([quake()], 1000);

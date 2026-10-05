@@ -5,7 +5,13 @@ const $$ = (s) => [...document.querySelectorAll(s)];
 
 const TZ = 'Atlantic/Reykjavik';
 const HOUR = 3600e3;
-const PRESETS = { '24h': 24, '48h': 48, '7d': 168, '30d': 720, '1y': 8760, all: null };
+const PRESETS = { '24h': 24, '48h': 48, '7d': 168, '30d': 720, '1y': 8760 };
+// Lengsta tímabil sem er sótt í einu, sama og þjónninn leyfir (MAX_SPAN_DAYS í server.ts)
+const MAX_SPAN = 366 * 24 * HOUR;
+
+// Lykkjur frekar en Math.min(...fylki): Safari leyfir mest 65.536 viðföng og kastar villu umfram það
+const minOf = (a, init = Infinity) => a.reduce((m, v) => (v < m ? v : m), init);
+const maxOf = (a, init = -Infinity) => a.reduce((m, v) => (v > m ? v : m), init);
 const STATUS_EVERY = 60e3;
 
 // Litur eftir aldri: nýtt = sterkt og heitt, gamalt = dauft. Sér skali fyrir dökkt þema.
@@ -95,13 +101,21 @@ function rampColor(t, ramps = RAMPS) {
   return stops[i].map((c, k) => Math.round(c + (stops[i + 1][k] - c) * f));
 }
 
+// Sérsniðið tímabil lengra en MAX_SPAN: hinn endinn (move) er færður að
+function limitCustomSpan(move) {
+  if (state.from == null || state.to == null || state.to - state.from <= MAX_SPAN) return;
+  if (move === 'to') state.to = state.from + MAX_SPAN;
+  else state.from = state.to - MAX_SPAN;
+}
+
 // Tímagluggi sem litaskalinn spannar
 function timeWindow() {
   const now = Date.now();
-  if (state.preset === 'custom') return [state.from ?? now - 48 * HOUR, state.to ?? now];
-  const h = PRESETS[state.preset];
-  if (h == null) return [quakes.length ? quakes[0].t : now - 48 * HOUR, now];
-  return [now - h * HOUR, now];
+  if (state.preset === 'custom') {
+    const to = state.to ?? now;
+    return [Math.max(state.from ?? now - 48 * HOUR, to - MAX_SPAN), to];
+  }
+  return [now - PRESETS[state.preset] * HOUR, now];
 }
 
 // Stærð eftir orku: þvermál tvöfaldast fyrir hverja stærðareiningu. Rétt orkukvörðun
@@ -127,8 +141,11 @@ function readUrl() {
   if (p.has('region')) state.region = p.get('region');
   if (p.has('range')) state.preset = p.get('range');
   if (!(state.preset in PRESETS) && state.preset !== 'custom') state.preset = '48h';
-  if (p.has('from')) state.from = parseLocal(p.get('from'));
-  if (p.has('to')) state.to = parseLocal(p.get('to'));
+  // Ógild dagsetning í slóð verður sjálfgefin frekar en NaN sem þjónninn hafnar
+  const date = (k) => (p.has(k) && Number.isFinite(parseLocal(p.get(k))) ? parseLocal(p.get(k)) : null);
+  state.from = date('from');
+  state.to = date('to');
+  limitCustomSpan('to');
   const num = (k) => (p.has(k) && p.get(k) !== '' && Number.isFinite(+p.get(k)) ? +p.get(k) : null);
   state.minMag = num('min');
   state.maxMag = num('max');
@@ -174,11 +191,10 @@ async function loadQuakes({ quiet = false } = {}) {
   const now = Date.now();
   let from, to;
   if (state.preset === 'custom') {
-    from = state.from ?? now - 48 * HOUR;
     to = state.to ?? now;
+    from = Math.max(state.from ?? now - 48 * HOUR, to - MAX_SPAN);
   } else {
-    const h = PRESETS[state.preset];
-    from = h == null ? 0 : now - h * HOUR;
+    from = now - PRESETS[state.preset] * HOUR;
     to = now + 60e3;
   }
   const p = new URLSearchParams({ region: state.region, from, to });
@@ -345,7 +361,7 @@ function renderStats(list) {
   const tile = (k, v, d = '') => `<div class="stat"><div class="k">${k}</div><div class="v">${v}</div><div class="d">${d}</div></div>`;
   // Þjónninn sýnir stærstu skjálftana þegar tímabilið er of stórt; segja frá því og hvar mörkin liggja
   const thinned = quakesTotal > quakes.length && quakes.length;
-  const minShown = thinned ? Math.min(...quakes.map((q) => q.mag)) : null;
+  const minShown = thinned ? minOf(quakes.map((q) => q.mag)) : null;
   const countNote = thinned
     ? `${quakes.length.toLocaleString('is-IS')} stærstu sýndir af ${quakesTotal.toLocaleString('is-IS')} (≥ M ${fmt1(minShown)})`
     : strong ? `${strong} af stærð 3 eða meira` : 'enginn af stærð 3 eða meira';
@@ -875,8 +891,12 @@ function renderTimeline(win) {
 
 let timelineBound = false;
 
-// Bil haldið innan marka, með sömu lengd ef hægt er
+// Bil haldið innan marka, með sömu lengd ef hægt er; aldrei lengra en MAX_SPAN (þysjað um miðjuna)
 function clampRange(a, b, lim) {
+  if (b - a > MAX_SPAN) {
+    const c = (a + b) / 2;
+    [a, b] = [c - MAX_SPAN / 2, c + MAX_SPAN / 2];
+  }
   const span = Math.min(b - a, lim[1] - lim[0]);
   a = clamp(a, lim[0], lim[1] - span);
   return [a, a + span];
@@ -1040,13 +1060,13 @@ function render3d(list, win, shown = list, at) {
   let r = bounds(region);
   if (r === ICELAND && list.length) {
     // Allt landið ásamt skjálftum utan við strönd
-    const pad = (a, [lo, hi]) => [Math.min(lo, ...a.map((v) => v - 0.1)), Math.max(hi, ...a.map((v) => v + 0.1))];
+    const pad = (a, [lo, hi]) => [minOf(a, lo + 0.1) - 0.1, maxOf(a, hi - 0.1) + 0.1];
     r = { lat: pad(list.map((q) => q.lat), ICELAND.lat), lon: pad(list.map((q) => q.lon), ICELAND.lon) };
   }
   const latMid = (r.lat[0] + r.lat[1]) / 2;
   const kmX = (r.lon[1] - r.lon[0]) * 111.32 * Math.cos((latMid * Math.PI) / 180);
   const kmY = (r.lat[1] - r.lat[0]) * 111.32;
-  const maxDepth = Math.max(10, ...list.map((q) => q.depth));
+  const maxDepth = maxOf(list.map((q) => q.depth), 10);
   const styles = shown.map((q) => style(q, win, at));
   const grid = css('--line');
   const axis = { gridcolor: grid, zerolinecolor: grid, backgroundcolor: 'transparent', color: css('--ink-2') };
@@ -1364,7 +1384,7 @@ function analyzeAftershocks(main) {
   const bValue = above.length >= 10 ? Math.log10(Math.E) / (above.reduce((s, m) => s + m, 0) / above.length - (mc - 0.05)) : null;
   const steps = [];
   if (mags.length) {
-    const min = Math.min(...mags), max = Math.max(...mags);
+    const min = minOf(mags), max = maxOf(mags);
     for (let m = min; m <= max + 1e-9; m += 0.1) {
       const mm = Math.round(m * 10) / 10;
       steps.push({ m: mm, n: mags.filter((x) => x >= mm - 1e-9).length });
@@ -1489,7 +1509,9 @@ function bindControls() {
     filtersChanged();
   };
   const dateInput = (key) => (e) => {
-    state[key] = e.target.value ? parseLocal(e.target.value) : null;
+    const v = e.target.value ? parseLocal(e.target.value) : null;
+    state[key] = Number.isFinite(v) ? v : null;
+    limitCustomSpan(key === 'from' ? 'to' : 'from');
     filtersChanged();
   };
   $('#from').onchange = dateInput('from');

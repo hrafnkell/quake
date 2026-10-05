@@ -33,6 +33,7 @@ const CORE = ['time', 'lat', 'lon', 'depth', 'mag', 'quality'] as const;
 const PLACE = ['distKm', 'direction', 'refPlace'] as const;
 const REV_COLUMNS = 'time, lat, lon, depth, mag, quality, dist_km AS distKm, direction, ref_place AS refPlace, raw';
 const COLUMNS = REV_COLUMNS.replace(', raw', ', region, event_id AS eventId, raw');
+const QUERY_COLUMNS = COLUMNS.replace(', raw', '');
 // Hámark í einni fyrirspurn; sé meira á tímabilinu eru stærstu skjálftarnir sýndir (sjá query)
 export const MAX_ROWS = 100_000;
 
@@ -245,7 +246,8 @@ export class QuakeStore {
     };
     const total = this.db.query<{ n: number }, Record<string, number>>(`SELECT count(*) AS n FROM quakes ${where}`).get(params)!.n;
     const order = total > MAX_ROWS ? 'mag DESC, time DESC' : 'time';
-    const rows = this.db.query<Quake, Record<string, number>>(`SELECT ${COLUMNS} FROM quakes ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`).all(params);
+    // raw er ekki sent í viðmótið og að sleppa því styttir stórar fyrirspurnir um þriðjung
+    const rows = this.db.query<Quake, Record<string, number>>(`SELECT ${QUERY_COLUMNS} FROM quakes ${where} ORDER BY ${order} LIMIT ${MAX_ROWS}`).all(params);
     if (total > MAX_ROWS) rows.sort((a, b) => a.time - b.time);
     return { rows, total };
   }
