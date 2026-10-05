@@ -29,6 +29,7 @@ let regions = [];
 let defaultRegion = 'island';
 let places = [];
 let quakes = [];
+let dataFirst = null; // elsti skjálfti í grunni, ms (úr /api/status)
 let dataVersion = null;
 let lastFetch = 0;
 let fetchSeq = 0;
@@ -192,6 +193,7 @@ async function loadQuakes({ quiet = false } = {}) {
 async function checkStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
+    if (s.first) dataFirst = s.first * 1000;
     if (s.source === 'catalog') {
       // Varaleið: vedur.is svarar ekki en skjálftaskráin heldur kortinu lifandi
       setStatus(`Uppfært kl ${fmtClock.format(s.lastOk)} úr skjálftaskrá · vedur.is svarar ekki`, 'warn');
@@ -635,6 +637,7 @@ function renderTimeline(win) {
     displaylogo: false,
     responsive: true,
     scrollZoom: false, // eigin skrunþysjun, aðeins virk eftir smell svo síðan skruni annars
+    doubleClick: false, // eigin tvísmellur: Plotly færi annars í fyrsta bilið sem það sá, ekki núverandi glugga
     modeBarButtons: [['pan2d', 'zoom2d'], ['zoomIn2d', 'zoomOut2d'], ['autoScale2d'], ['toImage']],
   });
   // Plotly bætir .on() við elementið við fyrstu teikningu
@@ -643,12 +646,34 @@ function renderTimeline(win) {
 
 let timelineBound = false;
 
-// Sýnilegt bil tímalínunnar, haldið innan gluggans sem gögnin ná yfir
-function clampRange(a, b, win) {
-  const span = Math.min(b - a, win[1] - win[0]);
-  a = clamp(a, win[0], win[1] - span);
+// Bil haldið innan marka, með sömu lengd ef hægt er
+function clampRange(a, b, lim) {
+  const span = Math.min(b - a, lim[1] - lim[0]);
+  a = clamp(a, lim[0], lim[1] - span);
   return [a, a + span];
 }
+
+// Ystu mörk sem hægt er að draga tímalínuna um: frá elsta skjálfta í grunni til núna
+function dataLimits(win) {
+  return [Math.min(dataFirst ?? win[0], win[0]), Math.max(Date.now(), win[1])];
+}
+
+// Dregið eða þysjað út fyrir sótt gögn: tímabilið verður sérsniðið og jafnt því sem sést, og gögnin sótt.
+// Beðið augnablik svo margar hreyfingar í röð (skrunhjól) verði ein sókn.
+let extendTimer = 0;
+function extendWindow(a, b) {
+  state.preset = 'custom';
+  state.from = a;
+  state.to = b;
+  state.brush = null;
+  syncControls();
+  writeUrl();
+  renderBrushChip();
+  clearTimeout(extendTimer);
+  extendTimer = setTimeout(() => loadQuakes(), 350);
+}
+
+const showWindow = (win) => Plotly.relayout('timeline', { 'xaxis.range': [isoMs(win[0]), isoMs(win[1])] });
 
 function bindTimeline() {
   timelineBound = true;
@@ -656,23 +681,28 @@ function bindTimeline() {
   el.on('plotly_relayout', (ev) => {
     const r0 = ev['xaxis.range[0]'] ?? ev['xaxis.range']?.[0];
     const r1 = ev['xaxis.range[1]'] ?? ev['xaxis.range']?.[1];
+    const near = (x, y) => Math.abs(x - y) < 1000;
     if (r0 != null) {
       const win = timeWindow();
-      const [a, b] = clampRange(parseLocal(r0), parseLocal(r1), win);
-      const near = (x, y) => Math.abs(x - y) < 1000;
-      if (near(a, win[0]) && near(b, win[1])) {
-        // Allur glugginn sýnilegur: ekkert val; snúa til baka ef dregið var út fyrir
-        if (!near(a, parseLocal(r0)) || !near(b, parseLocal(r1))) Plotly.relayout('timeline', { 'xaxis.autorange': true });
-        state.brush = null;
-      } else if (!near(a, parseLocal(r0)) || !near(b, parseLocal(r1))) {
-        // Dregið út fyrir gögnin: snúa til baka (kallar þetta aftur með bilinu innan marka)
-        Plotly.relayout('timeline', { 'xaxis.range': [isoMs(a), isoMs(b)] });
+      const [a, b] = clampRange(parseLocal(r0), parseLocal(r1), dataLimits(win));
+      if (a < win[0] - 1000 || b > win[1] + 1000) {
+        // Út fyrir sótt gögn: stækka gluggann og sækja, nema ekkert sé að sækja (við ystu mörk)
+        if (near(a, win[0]) && near(b, win[1])) showWindow(win);
+        else extendWindow(a, b);
         return;
+      }
+      if (near(a, win[0]) && near(b, win[1])) {
+        // Allur glugginn sýnilegur: ekkert val
+        if (!near(a, parseLocal(r0)) || !near(b, parseLocal(r1))) showWindow(win);
+        state.brush = null;
       } else {
         state.brush = [a, b];
       }
     } else if (ev['xaxis.autorange']) {
+      // Tvísmellur: sýna allan sótta gluggann (kallar þetta aftur með bilinu)
       state.brush = null;
+      showWindow(timeWindow());
+      return;
     } else return;
     if (player.active) exitPlayback({ rerender: false });
     const list = visibleQuakes();
@@ -688,6 +718,7 @@ function bindTimeline() {
     if (pt) focusQuake(quakes[pt.pointIndex]);
   });
   bindTimelineWheel(el);
+  el.addEventListener('dblclick', clearBrush);
 }
 
 // Skrunhjól þysjar um bendilinn, en aðeins eftir að smellt hefur verið á tímalínuna (eins og kortið),
@@ -717,10 +748,10 @@ function bindTimelineWheel(el) {
       const win = timeWindow();
       const [a, b] = state.brush ?? win;
       const c = a + frac * (b - a);
-      const [na, nb] = clampRange(c - (c - a) * factor, c + (b - c) * factor, win);
+      const [na, nb] = clampRange(c - (c - a) * factor, c + (b - c) * factor, dataLimits(win));
       factor = 1;
       if (nb - na < 60e3) return; // ekki þysja nær en mínútu
-      Plotly.relayout('timeline', nb - na >= win[1] - win[0] - 1000 ? { 'xaxis.autorange': true } : { 'xaxis.range': [isoMs(na), isoMs(nb)] });
+      Plotly.relayout('timeline', { 'xaxis.range': [isoMs(na), isoMs(nb)] });
     });
   }, { passive: false });
 }
@@ -734,7 +765,7 @@ function renderBrushChip() {
 
 function clearBrush() {
   state.brush = null;
-  Plotly.relayout('timeline', { 'xaxis.autorange': true });
+  showWindow(timeWindow());
   render();
 }
 
