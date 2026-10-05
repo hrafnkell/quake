@@ -26,13 +26,9 @@ export const REGIONS: Region[] = [
 export const PLACES: { name: string; lat: number; lon: number }[] = [
   { name: 'Grindavík', lat: 63.845, lon: -22.432 },
   { name: 'Þorbjörn', lat: 63.866, lon: -22.437 },
-  { name: 'Bláa Lónið', lat: 63.879, lon: -22.447 },
   { name: 'Vogar', lat: 63.981, lon: -22.381 },
-  { name: 'Fagradalsfjall', lat: 63.89, lon: -22.269 },
   { name: 'KEF', lat: 63.997, lon: -22.626 },
   { name: 'Kleifarvatn', lat: 63.925, lon: -21.979 },
-  { name: 'Reykjanestá', lat: 63.8, lon: -22.701 },
-  { name: 'Búrfell', lat: 64.032, lon: -21.831 },
   { name: 'Hveragerði', lat: 64.0, lon: -21.19 },
   { name: 'Katla', lat: 63.63, lon: -19.05 },
   { name: 'Eyjafjallajökull', lat: 63.63, lon: -19.62 },

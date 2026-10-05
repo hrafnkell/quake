@@ -8,6 +8,8 @@ export type QuakeFilter = {
   lon: [number, number];
   minMag: number;
   maxMag: number;
+  minDepth?: number; // km, sjálfgefið engin mörk
+  maxDepth?: number;
 };
 
 export type Revision = Quake & { seenAt: number };
@@ -261,11 +263,13 @@ export class QuakeStore {
       WHERE withdrawn_at IS NULL
         AND time BETWEEN $from AND $to
         AND lat BETWEEN $latMin AND $latMax AND lon BETWEEN $lonMin AND $lonMax
-        AND mag BETWEEN $minMag AND $maxMag`;
+        AND mag BETWEEN $minMag AND $maxMag
+        AND depth BETWEEN $minDepth AND $maxDepth`;
     const params = {
       $from: f.from, $to: f.to,
       $latMin: f.lat[0], $latMax: f.lat[1], $lonMin: f.lon[0], $lonMax: f.lon[1],
       $minMag: f.minMag, $maxMag: f.maxMag,
+      $minDepth: f.minDepth ?? -1e6, $maxDepth: f.maxDepth ?? 1e6,
     };
     const total = this.db.query<{ n: number }, Record<string, number>>(`SELECT count(*) AS n FROM quakes ${where}`).get(params)!.n;
     const order = total > MAX_ROWS ? 'mag DESC, time DESC' : 'time';

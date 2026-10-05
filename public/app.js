@@ -33,6 +33,8 @@ const state = {
   to: null,
   minMag: null,
   maxMag: null,
+  minDepth: null, // km
+  maxDepth: null,
   view: 'map',
   layer: 'dots', // 'dots' | 'density' (þéttleiki í sexhyrningum)
   brush: null, // [ms, ms] valið á tímalínu
@@ -158,6 +160,8 @@ function readUrl() {
   const num = (k) => (p.has(k) && p.get(k) !== '' && Number.isFinite(+p.get(k)) ? +p.get(k) : null);
   state.minMag = num('min');
   state.maxMag = num('max');
+  state.minDepth = num('dmin');
+  state.maxDepth = num('dmax');
   if (['map', '3d', 'table', 'heat'].includes(p.get('view'))) state.view = p.get('view');
   state.event = p.get('event') || null; // staðfest þegar atburðir hafa verið sóttir
   if (p.get('metric') === 'count') state.heatMetric = 'count';
@@ -176,6 +180,8 @@ function writeUrl() {
   }
   if (state.minMag != null) p.set('min', state.minMag);
   if (state.maxMag != null) p.set('max', state.maxMag);
+  if (state.minDepth != null) p.set('dmin', state.minDepth);
+  if (state.maxDepth != null) p.set('dmax', state.maxDepth);
   if (state.event) p.set('event', state.event);
   if (state.view !== 'map') p.set('view', state.view);
   if (state.layer !== 'dots') p.set('layer', state.layer);
@@ -219,6 +225,8 @@ async function loadQuakes({ quiet = false } = {}) {
   const p = new URLSearchParams({ region: state.region, from, to });
   if (state.minMag != null) p.set('minMag', state.minMag);
   if (state.maxMag != null) p.set('maxMag', state.maxMag);
+  if (state.minDepth != null) p.set('minDepth', state.minDepth);
+  if (state.maxDepth != null) p.set('maxDepth', state.maxDepth);
 
   if (!quiet) setStatus('Sæki…');
   try {
@@ -966,7 +974,7 @@ function renderTimeline(win) {
     hovermode: 'closest',
     hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
     // Halda vali á tímabili þegar gögn uppfærast sjálfkrafa
-    uirevision: `${state.region}|${state.preset}|${state.from}|${state.to}|${state.minMag}|${state.maxMag}`,
+    uirevision: `${state.region}|${state.preset}|${state.from}|${state.to}|${state.minMag}|${state.maxMag}|${state.minDepth}|${state.maxDepth}`,
     ...timelineShapes(win),
     // Alltaf skýrt bil: án þess sýnir Plotly öll gögn þegar uirevision breytist en kortið er síað á valið
     xaxis: { ...axis, type: 'date', range: (state.brush ?? win).map(isoLocal) },
@@ -1891,6 +1899,8 @@ function syncControls() {
   $('#to').value = state.to ? isoLocal(state.to).slice(0, 16) : '';
   $('#min-mag').value = state.minMag ?? '';
   $('#max-mag').value = state.maxMag ?? '';
+  $('#min-depth').value = state.minDepth ?? '';
+  $('#max-depth').value = state.maxDepth ?? '';
   $('#region-name').textContent = regions.find((r) => r.id === state.region)?.name ?? '';
 }
 
@@ -1937,13 +1947,15 @@ function bindControls() {
   };
   $('#from').onchange = dateInput('from');
   $('#to').onchange = dateInput('to');
-  const magInput = (key) => (e) => {
+  const numInput = (key) => (e) => {
     const v = e.target.value;
     state[key] = v === '' || !Number.isFinite(+v) ? null : +v;
     filtersChanged();
   };
-  $('#min-mag').onchange = magInput('minMag');
-  $('#max-mag').onchange = magInput('maxMag');
+  $('#min-mag').onchange = numInput('minMag');
+  $('#max-mag').onchange = numInput('maxMag');
+  $('#min-depth').onchange = numInput('minDepth');
+  $('#max-depth').onchange = numInput('maxDepth');
 
   $('.tabs').onclick = (e) => {
     const b = e.target.closest('[data-view]');

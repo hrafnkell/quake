@@ -197,13 +197,16 @@ function quakes(req: Request, url: URL) {
   const to = numParam(url, 'to', now);
   const minMag = numParam(url, 'minMag', -10);
   const maxMag = numParam(url, 'maxMag', 10);
-  if ([from, to, minMag, maxMag].some(Number.isNaN)) return json(req, { error: 'Ógild færibreyta' }, 400);
+  // Dýpi í km; engin mörk sjálfgefið (sumir skjálftar eru skráðir rétt ofan við sjávarmál)
+  const minDepth = numParam(url, 'minDepth', -1e6);
+  const maxDepth = numParam(url, 'maxDepth', 1e6);
+  if ([from, to, minMag, maxMag, minDepth, maxDepth].some(Number.isNaN)) return json(req, { error: 'Ógild færibreyta' }, 400);
   // Smá svigrúm fyrir klukkuskekkju og "til" sem viðmótið setur aðeins fram í tímann
   if (to - from > (MAX_SPAN_DAYS + 1) * 86400e3) return json(req, { error: `Tímabil má mest vera ${MAX_SPAN_DAYS} dagar` }, 400);
 
   const { rows, total } = store.query({
     from: Math.floor(from / 1000), to: Math.ceil(to / 1000),
-    lat: region.lat, lon: region.lon, minMag, maxMag,
+    lat: region.lat, lon: region.lon, minMag, maxMag, minDepth, maxDepth,
   });
   // Dálkasnið sjálfgefið (sjá src/encode.ts), raðir með ?format=rows. total > n: stærstu skjálftarnir sýndir
   if (url.searchParams.get('format') === 'rows') return json(req, { version: status.version, total, quakes: toRows(rows) });

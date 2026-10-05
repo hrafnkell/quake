@@ -215,3 +215,11 @@ test('query thins by magnitude when a period has more than MAX_ROWS quakes', () 
   const { MAX_ROWS } = require('./db');
   expect(MAX_ROWS).toBeGreaterThan(30);
 });
+
+test('query filters by depth', () => {
+  const store = new QuakeStore(':memory:');
+  store.upsert([quake({ depth: 2 }), quake({ time: T0 + 600, lat: 64.5, lon: -17.5, depth: 12 })], 1000);
+  expect(store.query({ ...ALL, maxDepth: 5 }).rows.map((r) => r.depth)).toEqual([2]);
+  expect(store.query({ ...ALL, minDepth: 5 }).rows.map((r) => r.depth)).toEqual([12]);
+  expect(store.query(ALL).rows).toHaveLength(2);
+});

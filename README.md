@@ -83,7 +83,7 @@ og viðmótið gul merki á meðan. `FEED_URL` yfirskrifar slóð síðunnar (ti
 
 ## API
 
-- `GET /api/quakes?region=reykjanes&from=<ms>&to=<ms>&minMag=&maxMag=`: dálkasnið (sjá `src/encode.ts`): hver reitur
+- `GET /api/quakes?region=reykjanes&from=<ms>&to=<ms>&minMag=&maxMag=&minDepth=&maxDepth=` (dýpi í km): dálkasnið (sjá `src/encode.ts`): hver reitur
   er fylki, tími sem mismunur í sekúndum, hnit ×1000, dýpt/stærð ×10, strengir sem vísar í `strings`. Helmingi minna
   þjappað en raðir og fljótara að lesa. `&format=rows` skilar hlutum (`t` í ms, `lat`, `lon`, `depth`, `mag`, `q`, `dist`, `dir`, `ref`, `region`).
   Mest 100 000 skjálftar í svari; séu fleiri á tímabilinu eru þeir stærstu sendir og `total` segir heildarfjöldann.
