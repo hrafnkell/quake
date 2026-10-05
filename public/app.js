@@ -1423,8 +1423,8 @@ function renderAftershocks() {
     paper_bgcolor: 'transparent', plot_bgcolor: 'transparent', font: plotFont(), showlegend: false,
     hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
     annotations: [
-      { text: 'Tíðni eftirskjálfta (Omori)', xref: 'paper', yref: 'paper', x: 0.22, y: 1.08, showarrow: false, font: { size: 12 } },
-      { text: 'Stærðardreifing (Gutenberg–Richter)', xref: 'paper', yref: 'paper', x: 0.78, y: 1.08, showarrow: false, font: { size: 12 } },
+      { text: 'Tíðni eftirskjálfta (Omori)', xref: 'paper', yref: 'paper', x: 0, xanchor: 'left', y: 1.08, showarrow: false, font: { size: 12 } },
+      { text: 'Stærðardreifing (Gutenberg–Richter)', xref: 'paper', yref: 'paper', x: 0.55, xanchor: 'left', y: 1.08, showarrow: false, font: { size: 12 } },
     ],
     xaxis: { ...axis, type: 'log', domain: [0, 0.45], title: { text: 'Klst eftir skjálftann' } },
     yaxis: { ...axis, type: 'log', title: { text: 'Skjálftar á klst' } },
