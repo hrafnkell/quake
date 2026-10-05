@@ -180,6 +180,10 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); 
 .hint { font-size: 0.8rem; color: var(--ink-3); }
 #timeline { height: 300px; }
 
+.footer { margin-top: 24px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 0.8rem; color: var(--ink-3); text-align: center; }
+.footer a { color: inherit; }
+.footer a:hover { color: var(--accent); }
+
 /* Leaflet */
 @media (prefers-color-scheme: dark) {
   .osm-tiles { filter: invert(1) hue-rotate(180deg) brightness(0.85) contrast(0.9) saturate(0.6); }
