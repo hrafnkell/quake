@@ -3,6 +3,24 @@
 Sækir jarðskjálftagögn frá [vedur.is](https://www.vedur.is/skjalftar-og-eldgos/jardskjalftar) á 5 mínútna fresti,
 geymir þau í SQLite og birtir á korti, tímalínu, í 3D og í töflu.
 
+Í loftinu á [quake.hlekkir.is](https://quake.hlekkir.is).
+
+## Skjámyndir
+
+![Kort: eldgosið við Sundhnúk í desember 2023, með atburðaspjaldi, korti og tímalínu](docs/screenshots/map-event.jpg)
+*Eldgosið við Sundhnúk í desember 2023: atburður valinn úr „Atburðir“, skjálftar litaðir eftir aldri og stærð eftir orku, tímalína með fjölda og stærð.*
+
+| | |
+|---|---|
+| ![3D sýn af kvikuganginum undir Grindavík í nóvember 2023](docs/screenshots/3d.jpg) | ![Þéttleiki skjálfta í sexhyrningum við Bárðarbungu og Holuhraun 2014](docs/screenshots/density.jpg) |
+| **3D:** kvikugangurinn undir Grindavík 2023, með strandlínu og upptökum á yfirborði | **Þéttleiki:** kvikugangurinn frá Bárðarbungu að Holuhrauni 2014 |
+| ![Hitakort: samanlögð orka skjálfta á Íslandi 1991–2026](docs/screenshots/heatmap.jpg) | ![Hitakort: fjöldi skjálfta á Reykjanesskaga 2023](docs/screenshots/heatmap-reykjanes-2023.jpg) |
+| **Hitakort, orka:** allir skjálftar frá 1991, samanlögð orka sem stærð eins skjálfta | **Hitakort, fjöldi:** Reykjanesskagi 2023, með súlum eftir árum |
+| ![Kort í dökku þema: skjálftar síðustu 7 daga](docs/screenshots/dark.jpg) | |
+| **Dökkt þema:** síðustu 7 dagar | |
+
+## Uppbygging
+
 - `src/server.ts`: Bun vefþjónn, API og reglubundin sókn
 - `src/scrape.ts`: les skjálftagögn úr síðu Veðurstofunnar
 - `src/db.ts`: SQLite geymsla (`bun:sqlite`), rekur endurmat og útfellingar Veðurstofunnar (sjá neðar)

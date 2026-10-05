@@ -87,6 +87,7 @@ function spanLabel(ms) {
 }
 
 // Skjálftar úr skjálftaskrá (bakfylling) hafa aðeins svæðisheiti, ekki fjarlægð frá örnefni
+const joinDot = (...parts) => parts.filter(Boolean).join(' · ');
 const place = (q) => (q.ref ? `${q.dist != null ? fmt1(q.dist) + ' km ' : ''}${q.dir ?? ''} af ${q.ref.replaceAll('_', ' ')}` : q.region ?? '');
 
 // Íslenskur tími = UTC, svo ISO án tímabeltis er réttur tími fyrir Plotly og datetime-local
@@ -496,8 +497,9 @@ function renderStats(list) {
     : strong ? `${strong} af stærð 3 eða meira` : 'enginn af stærð 3 eða meira';
   $('#stats').innerHTML = [
     tile('Fjöldi skjálfta', list.length.toLocaleString('is-IS'), countNote),
-    biggest ? tile('Stærsti', `M ${fmt1(biggest.mag)}`, `${esc(place(biggest))} · ${ago(biggest.t)}`) : tile('Stærsti', '–'),
-    latest ? tile('Nýjasti', ago(latest.t), `M ${fmt1(latest.mag)} · ${esc(place(latest))}`) : tile('Nýjasti', '–'),
+    // Eldri skjálftar úr skjálftaskrá hafa yfirleitt enga staðarlýsingu; sleppa þá tómum hluta
+    biggest ? tile('Stærsti', `M ${fmt1(biggest.mag)}`, joinDot(esc(place(biggest)), ago(biggest.t))) : tile('Stærsti', '–'),
+    latest ? tile('Nýjasti', ago(latest.t), joinDot(`M ${fmt1(latest.mag)}`, esc(place(latest)))) : tile('Nýjasti', '–'),
   ].join('');
 }
 
@@ -519,7 +521,8 @@ let map, quakeLayer, baseLayers, legendControl;
 const byMagDesc = (a, b) => b.mag - a.mag;
 
 function initMap() {
-  map = L.map('map', { preferCanvas: true, zoomSnap: 0.25, scrollWheelZoom: false });
+  // Heilar þysjunartölur: við brotnar (0,25) skalast kortaflísar og ljós rák sést milli þeirra
+  map = L.map('map', { preferCanvas: true, scrollWheelZoom: false });
   // Skrunhjól þysjar aðeins eftir að smellt er á kortið, annars skrunar síðan
   map.on('click focus', () => map.scrollWheelZoom.enable());
   map.on('mouseout blur', () => map.scrollWheelZoom.disable());
@@ -597,10 +600,23 @@ function fitRegion(m = map) {
   // og allt landið nær líka yfir skjálfta utan við strönd
   if (m === map && state.view !== 'map') {
     setFocus(b === ICELAND ? null : { lat: [...b.lat], lon: [...b.lon] });
-    mapFitPending = true; // þysjað þegar kortið birtist aftur
-    return;
+    mapFitPending = true; // þysjað rétt þegar kortið birtist aftur
   }
-  m.fitBounds([[b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]]);
+  // Líka þegar kortið er falið: án upphafsstöðu bætir Leaflet ekki við lögum og canvas skjálfta verður ekki til
+  fitArea(m, L.latLngBounds([b.lat[0], b.lon[0]], [b.lat[1], b.lon[1]]));
+}
+
+// Kortin nota heilar þysjunartölur (sjá L.map), og fitBounds rúnar þá alltaf niður: Ísland sem passar á 6,75
+// fengi 6 og fyllti hálft kortið. Hér er rúnað upp þegar svæðið nær langleiðina að næsta stigi; jaðrarnir
+// skerast þá lítillega (mest ~10 % á hvorri hlið) í stað þess að helmingur kortsins sé tómur.
+function fitArea(m, bb) {
+  const snap = m.options.zoomSnap;
+  m.options.zoomSnap = 0;
+  const z = m.getBoundsZoom(bb);
+  m.options.zoomSnap = snap;
+  // Falið kort hefur enga stærð og gefur óendanlega þysjun; þá dugar gróf staða þar til það birtist
+  if (!Number.isFinite(z)) return m.setView(bb.getCenter(), 6);
+  m.setView(bb.getCenter(), z % 1 >= 0.7 ? Math.ceil(z) : Math.floor(z));
 }
 let mapFitPending = false;
 
@@ -1764,7 +1780,7 @@ function renderHeatLegend(d) {
 }
 
 function initHeatMap() {
-  const m = (heat.map = L.map('heatmap', { zoomSnap: 0.25, scrollWheelZoom: false, zoomAnimation: false }));
+  const m = (heat.map = L.map('heatmap', { scrollWheelZoom: false, zoomAnimation: false }));
   m.on('click focus', () => m.scrollWheelZoom.enable());
   m.on('mouseout blur', () => m.scrollWheelZoom.disable());
   const base = makeBaseLayers();
