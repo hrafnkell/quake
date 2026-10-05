@@ -69,6 +69,7 @@ const place = (q) => (q.ref ? `${q.dist != null ? fmt1(q.dist) + ' km ' : ''}${q
 
 // Íslenskur tími = UTC, svo ISO án tímabeltis er réttur tími fyrir Plotly og datetime-local
 const isoLocal = (ms) => new Date(ms).toISOString().slice(0, 19);
+const isoMs = (ms) => new Date(ms).toISOString().slice(0, 23); // með millisekúndum, fyrir ásbil
 const parseLocal = (s) => Date.parse(s.replace(' ', 'T') + (s.endsWith('Z') ? '' : 'Z'));
 
 function hexToRgb(h) {
@@ -617,7 +618,9 @@ function renderTimeline(win) {
     plot_bgcolor: 'transparent',
     font: plotFont(),
     showlegend: false,
-    dragmode: 'zoom',
+    // Dregið færir tímalínuna; það sem sést er það sem kortið sýnir. Þysjun með skrunhjóli
+    // (eftir smell), hnöppum í stikunni, eða með því að velja kassaþysjun þar.
+    dragmode: 'pan',
     bargap: 0.08,
     hovermode: 'closest',
     hoverlabel: { bgcolor: css('--surface'), bordercolor: grid, font: { color: css('--ink') } },
@@ -628,19 +631,46 @@ function renderTimeline(win) {
     yaxis: { ...axis, domain: [0, 0.68], title: { text: 'Stærð' }, fixedrange: true, rangemode: 'tozero' },
     yaxis2: { ...axis, domain: [0.76, 1], title: { text: 'Fjöldi' }, fixedrange: true, rangemode: 'tozero', tickformat: 'd', nticks: 3 },
   };
-  Plotly.react('timeline', [counts, points], layout, { displaylogo: false, responsive: true, modeBarButtons: [['toImage']] });
+  Plotly.react('timeline', [counts, points], layout, {
+    displaylogo: false,
+    responsive: true,
+    scrollZoom: false, // eigin skrunþysjun, aðeins virk eftir smell svo síðan skruni annars
+    modeBarButtons: [['pan2d', 'zoom2d'], ['zoomIn2d', 'zoomOut2d'], ['autoScale2d'], ['toImage']],
+  });
   // Plotly bætir .on() við elementið við fyrstu teikningu
   if (!timelineBound) bindTimeline();
 }
 
 let timelineBound = false;
 
+// Sýnilegt bil tímalínunnar, haldið innan gluggans sem gögnin ná yfir
+function clampRange(a, b, win) {
+  const span = Math.min(b - a, win[1] - win[0]);
+  a = clamp(a, win[0], win[1] - span);
+  return [a, a + span];
+}
+
 function bindTimeline() {
   timelineBound = true;
   const el = $('#timeline');
   el.on('plotly_relayout', (ev) => {
-    if (ev['xaxis.range[0]'] != null) {
-      state.brush = [parseLocal(ev['xaxis.range[0]']), parseLocal(ev['xaxis.range[1]'])];
+    const r0 = ev['xaxis.range[0]'] ?? ev['xaxis.range']?.[0];
+    const r1 = ev['xaxis.range[1]'] ?? ev['xaxis.range']?.[1];
+    if (r0 != null) {
+      const win = timeWindow();
+      const [a, b] = clampRange(parseLocal(r0), parseLocal(r1), win);
+      const near = (x, y) => Math.abs(x - y) < 1000;
+      if (near(a, win[0]) && near(b, win[1])) {
+        // Allur glugginn sýnilegur: ekkert val; snúa til baka ef dregið var út fyrir
+        if (!near(a, parseLocal(r0)) || !near(b, parseLocal(r1))) Plotly.relayout('timeline', { 'xaxis.autorange': true });
+        state.brush = null;
+      } else if (!near(a, parseLocal(r0)) || !near(b, parseLocal(r1))) {
+        // Dregið út fyrir gögnin: snúa til baka (kallar þetta aftur með bilinu innan marka)
+        Plotly.relayout('timeline', { 'xaxis.range': [isoMs(a), isoMs(b)] });
+        return;
+      } else {
+        state.brush = [a, b];
+      }
     } else if (ev['xaxis.autorange']) {
       state.brush = null;
     } else return;
@@ -657,6 +687,42 @@ function bindTimeline() {
     const pt = ev.points.find((p) => p.data.type === 'scattergl');
     if (pt) focusQuake(quakes[pt.pointIndex]);
   });
+  bindTimelineWheel(el);
+}
+
+// Skrunhjól þysjar um bendilinn, en aðeins eftir að smellt hefur verið á tímalínuna (eins og kortið),
+// annars skrunar síðan. Mörg skrunatvik í röð eru sameinuð í eina endurteiknun per ramma.
+function bindTimelineWheel(el) {
+  let armed = false;
+  let factor = 1;
+  let frac = 0.5;
+  let raf = 0;
+  el.addEventListener('mousedown', () => (armed = true));
+  el.addEventListener('click', () => (armed = true));
+  // Plotly leggur gagnsæja hulu yfir síðuna meðan músarhnappi er haldið; það telst ekki að yfirgefa tímalínuna
+  el.addEventListener('mouseleave', (e) => {
+    if (!e.relatedTarget?.classList?.contains('dragcover')) armed = false;
+  });
+  el.addEventListener('wheel', (e) => {
+    if (!armed) return;
+    const xa = el._fullLayout?.xaxis;
+    if (!xa) return;
+    e.preventDefault();
+    const x = e.clientX - el.getBoundingClientRect().left - xa._offset;
+    frac = clamp(x / xa._length, 0, 1);
+    factor *= e.deltaY > 0 ? 1.2 : 1 / 1.2;
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const win = timeWindow();
+      const [a, b] = state.brush ?? win;
+      const c = a + frac * (b - a);
+      const [na, nb] = clampRange(c - (c - a) * factor, c + (b - c) * factor, win);
+      factor = 1;
+      if (nb - na < 60e3) return; // ekki þysja nær en mínútu
+      Plotly.relayout('timeline', nb - na >= win[1] - win[0] - 1000 ? { 'xaxis.autorange': true } : { 'xaxis.range': [isoMs(na), isoMs(nb)] });
+    });
+  }, { passive: false });
 }
 
 function renderBrushChip() {
