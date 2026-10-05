@@ -77,7 +77,9 @@ Stillingar með umhverfisbreytum: `PORT` (3000), `HOST` (127.0.0.1), `DB_PATH` (
 
 ## API
 
-- `GET /api/quakes?region=reykjanes&from=<ms>&to=<ms>&minMag=&maxMag=`
+- `GET /api/quakes?region=reykjanes&from=<ms>&to=<ms>&minMag=&maxMag=`: dálkasnið (sjá `src/encode.ts`): hver reitur
+  er fylki, tími sem mismunur í sekúndum, hnit ×1000, dýpt/stærð ×10, strengir sem vísar í `strings`. Helmingi minna
+  þjappað en raðir og fljótara að lesa. `&format=rows` skilar hlutum (`t` í ms, `lat`, `lon`, `depth`, `mag`, `q`, `dist`, `dir`, `ref`, `region`).
 - `GET /api/regions`
 - `GET /api/status`: síðasta sókn, villur, fjöldi í grunni (`total` virkir, `withdrawn` felldir út), `catalog` (síðasta samstilling við skjálftaskrá)
 

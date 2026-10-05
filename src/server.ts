@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join, normalize } from 'node:path';
 import { fetchCatalog, windows } from './catalog';
 import { QuakeStore } from './db';
+import { encodeColumns, toRows } from './encode';
 import { DEFAULT_REGION, PLACES, REGIONS } from './regions';
 import { fetchFeed } from './scrape';
 
@@ -110,13 +111,9 @@ function quakes(req: Request, url: URL) {
     from: Math.floor(from / 1000), to: Math.ceil(to / 1000),
     lat: region.lat, lon: region.lon, minMag, maxMag,
   });
-  return json(req, {
-    version: status.version,
-    quakes: rows.map((q) => ({
-      t: q.time * 1000, lat: q.lat, lon: q.lon, depth: q.depth, mag: q.mag,
-      q: q.quality, dist: q.distKm, dir: q.direction, ref: q.refPlace, region: q.region,
-    })),
-  });
+  // Dálkasnið sjálfgefið (sjá src/encode.ts), raðir með ?format=rows
+  if (url.searchParams.get('format') === 'rows') return json(req, { version: status.version, quakes: toRows(rows) });
+  return json(req, { version: status.version, ...encodeColumns(rows) });
 }
 
 // Útgáfunúmer (hash af innihaldi) á app.js og style.css í index.html. Cloudflare lætur vafra

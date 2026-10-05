@@ -173,7 +173,7 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); 
 .playbar input[type=range] { flex: 1; min-width: 80px; accent-color: var(--accent); margin: 0; }
 .playbar select { height: 30px; padding: 2px 6px; }
 .play-time { font-size: 0.8rem; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 9ch; text-align: right; }
-.playback-canvas { pointer-events: none; }
+.quake-canvas { pointer-events: none; }
 
 .timeline-card { margin-top: 16px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 8px 4px; }
 .card-head { display: flex; gap: 12px; align-items: baseline; padding: 0 8px; flex-wrap: wrap; }

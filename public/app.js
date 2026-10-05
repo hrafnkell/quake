@@ -29,7 +29,6 @@ let regions = [];
 let defaultRegion = 'island';
 let places = [];
 let quakes = [];
-let markers = [];
 let dataVersion = null;
 let lastFetch = 0;
 let fetchSeq = 0;
@@ -142,6 +141,21 @@ function writeUrl() {
 
 // ---------- Gögn ----------
 
+// Dálkasnið þjónsins (sjá src/encode.ts) í hluti: tími í ms, hnit, dýpt, stærð, gæði, staðarlýsing
+function decodeColumns(c) {
+  const out = new Array(c.n);
+  const str = (i) => (i < 0 ? null : c.strings[i]);
+  let t = 0;
+  for (let i = 0; i < c.n; i++) {
+    t += c.t[i];
+    out[i] = {
+      t: t * 1000, lat: c.lat[i] / 1000, lon: c.lon[i] / 1000, depth: c.depth[i] / 10, mag: c.mag[i] / 10, q: c.q[i],
+      dist: c.dist[i] < 0 ? null : c.dist[i] / 10, dir: str(c.dir[i]), ref: str(c.ref[i]), region: str(c.region[i]),
+    };
+  }
+  return out;
+}
+
 async function loadQuakes({ quiet = false } = {}) {
   const seq = ++fetchSeq;
   const now = Date.now();
@@ -164,7 +178,7 @@ async function loadQuakes({ quiet = false } = {}) {
     if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error ?? res.statusText);
     const data = await res.json();
     if (seq !== fetchSeq) return; // nýrri beiðni komin af stað
-    quakes = data.quakes;
+    quakes = decodeColumns(data);
     dataVersion = data.version;
     lastFetch = Date.now();
     render();
@@ -247,6 +261,7 @@ function tooltipHtml(q) {
 // --- Kort ---
 
 let map, quakeLayer, baseLayers, legendControl;
+const byMagDesc = (a, b) => b.mag - a.mag;
 
 function initMap() {
   map = L.map('map', { preferCanvas: true, zoomSnap: 0.25, scrollWheelZoom: false });
@@ -271,7 +286,7 @@ function initMap() {
   baseLayers.Kort.addTo(map);
   L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
   L.control.scale({ imperial: false }).addTo(map);
-  quakeLayer = L.layerGroup().addTo(map);
+  quakeLayer = new QuakeCanvas().addTo(map);
 
   legendControl = L.control({ position: 'bottomright' });
   legendControl.onAdd = () => L.DomUtil.create('div', 'legend');
@@ -291,25 +306,192 @@ function fitRegion() {
 }
 
 function renderMap(list, win) {
-  quakeLayer.clearLayers();
-  markers = new Map();
-  // Stórir fyrst svo litlir skjálftar teiknist ofan á og hverfi ekki
-  const sorted = [...list].sort((a, b) => b.mag - a.mag);
-  const ring = css('--ink');
-  for (const q of sorted) {
-    const s = style(q, win);
-    const m = L.circleMarker([q.lat, q.lon], {
-      radius: s.radius,
-      fillColor: s.fill,
-      fillOpacity: s.opacity,
-      color: s.recent ? ring : s.fill,
-      weight: s.recent ? 2 : 1,
-      opacity: s.recent ? 0.9 : Math.min(1, s.opacity + 0.1),
-    }).bindTooltip(tooltipHtml(q), { className: 'quake-tip', direction: 'top', offset: [0, -s.radius] });
-    m.addTo(quakeLayer);
-    markers.set(q, m);
-  }
+  quakeLayer.setStatic(list, win);
 }
+
+// Skjálftar eru teiknaðir á canvas í stað Leaflet-merkja: tugþúsundir teiknast á ~100 ms í stað sekúndna.
+// Grunnlag með öllum skjálftum (stórir fyrst svo litlir hverfi ekki undir þá) og rist í skjáhnitum til
+// að finna skjálfta undir músinni fyrir ábendingu. Afspilun notar sömu canvas, sjá Afspilun neðar.
+const CELL = 48; // px, ≥ stærsta radíus svo nágrannareitir dugi
+const QuakeCanvas = L.Layer.extend({
+  onAdd(map) {
+    this._map = map;
+    const pane = map.getPanes().overlayPane;
+    this._base = L.DomUtil.create('canvas', 'leaflet-zoom-hide quake-canvas', pane);
+    this._top = L.DomUtil.create('canvas', 'leaflet-zoom-hide quake-canvas', pane);
+    this._list = [];
+    this._grid = new Map();
+    this._pending = [];
+    this._lastBase = 0;
+    map.on('moveend zoomend resize', this._reset, this);
+    map.on('mousemove', this._onMove, this);
+    map.on('mouseout', this._clearHover, this);
+    map.on('click', this._onClick, this);
+    this._reset();
+  },
+  onRemove(map) {
+    map.off('moveend zoomend resize', this._reset, this);
+    map.off('mousemove', this._onMove, this);
+    map.off('mouseout', this._clearHover, this);
+    map.off('click', this._onClick, this);
+    this._base.remove();
+    this._top.remove();
+  },
+  _reset() {
+    const size = this._map.getSize();
+    this._origin = this._map.containerPointToLayerPoint([0, 0]);
+    this._dpr = devicePixelRatio || 1;
+    for (const c of [this._base, this._top]) {
+      L.DomUtil.setPosition(c, this._origin);
+      c.width = size.x * this._dpr;
+      c.height = size.y * this._dpr;
+      c.style.width = `${size.x}px`;
+      c.style.height = `${size.y}px`;
+    }
+    this._size = size;
+    if (player.active) this.redrawAll();
+    else this.drawStatic();
+  },
+  // Punktar í canvas-hnitum = lagpunktar frá uppruna canvas; haldast réttir meðan dregið er
+  _point(q) {
+    const p = this._map.latLngToLayerPoint([q.lat, q.lon]);
+    return [p.x - this._origin.x, p.y - this._origin.y];
+  },
+  _ctx(canvas) {
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
+    ctx.clearRect(0, 0, this._size.x, this._size.y);
+    return ctx;
+  },
+  _visible(x, y, r) {
+    return x >= -r * 4 && y >= -r * 4 && x <= this._size.x + r * 4 && y <= this._size.y + r * 4;
+  },
+  // Einn skjálfti: fylltur hringur, útlína ef hann er innan klukkustundar frá viðmiðunartíma,
+  // og í „poppinu“ (p frá 0 til 1) yfirstærð sem skreppur saman ásamt hring sem þenst út og dofnar
+  _circle(ctx, x, y, r, color, alpha, recent, p = 1) {
+    const ease = 1 - (1 - p) ** 3;
+    ctx.beginPath();
+    ctx.arc(x, y, r * (1 + 1.4 * (1 - ease)), 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.globalAlpha = alpha;
+    ctx.fill();
+    ctx.lineWidth = recent ? 2 : 1;
+    ctx.strokeStyle = recent ? this._ink : color;
+    ctx.globalAlpha = recent ? 0.9 : Math.min(1, alpha + 0.1);
+    ctx.stroke();
+    if (p < 1) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * (1 + 2.5 * ease) + 2, 0, Math.PI * 2);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = (1 - ease) * 0.9;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  },
+
+  // --- Kyrrstæð sýn ---
+  setStatic(list, win) {
+    this._list = [...list].sort(byMagDesc);
+    this._win = win;
+    this.drawStatic();
+  },
+  drawStatic() {
+    this._ink = css('--ink');
+    this._clearHover();
+    this._ctx(this._top);
+    const ctx = this._ctx(this._base);
+    const grid = (this._grid = new Map());
+    if (!this._win) return;
+    const [a, b] = this._win;
+    const span = Math.max(b - a, 1);
+    const ramp = makeRamp();
+    const now = Date.now();
+    for (const q of this._list) {
+      const [x, y] = this._point(q);
+      const r = radiusFor(q.mag);
+      if (!this._visible(x, y, r)) continue;
+      const age = clamp((b - q.t) / span, 0, 1);
+      this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, now - q.t < HOUR);
+      const key = Math.floor(x / CELL) * 65536 + Math.floor(y / CELL);
+      let cell = grid.get(key);
+      if (!cell) grid.set(key, (cell = []));
+      cell.push({ q, x, y, r });
+    }
+  },
+  // Skjálftinn undir punkti (canvas-hnit): sá minnsti sem hittir, því hann er teiknaður ofan á
+  _hit(x, y) {
+    const cx = Math.floor(x / CELL), cy = Math.floor(y / CELL);
+    let best = null;
+    for (let i = cx - 1; i <= cx + 1; i++) {
+      for (let j = cy - 1; j <= cy + 1; j++) {
+        for (const e of this._grid.get(i * 65536 + j) ?? []) {
+          if (Math.hypot(e.x - x, e.y - y) <= e.r + 1.5 && (!best || e.r < best.r)) best = e;
+        }
+      }
+    }
+    return best;
+  },
+  _onMove(e) {
+    if (player.active) return;
+    const p = e.layerPoint;
+    const hit = this._hit(p.x - this._origin.x, p.y - this._origin.y);
+    if (hit?.q !== this._hover?.q) hit ? this.showTip(hit.q) : this._clearHover();
+    this._map.getContainer().style.cursor = hit ? 'pointer' : '';
+  },
+  _onClick(e) {
+    if (player.active) return;
+    const p = e.layerPoint;
+    const hit = this._hit(p.x - this._origin.x, p.y - this._origin.y);
+    if (hit) this.showTip(hit.q);
+  },
+  showTip(q) {
+    this._clearHover();
+    const r = radiusFor(q.mag);
+    this._tip = L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -r] }).setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q));
+    this._map.openTooltip(this._tip);
+    this._hover = { q };
+  },
+  _clearHover() {
+    if (this._tip) this._map.closeTooltip(this._tip);
+    this._tip = null;
+    this._hover = null;
+  },
+
+  // --- Afspilun: grunnlag með settum skjálftum, topplag með nýbirtum ---
+  // Grunnlag: allir settir skjálftar, litur eftir aldri miðað við afspilunartímann
+  redrawAll(now = performance.now()) {
+    this._ink = css('--ink');
+    this._grid = new Map();
+    const span = Math.max(player.range[1] - player.range[0], 1);
+    const ramp = makeRamp();
+    const ctx = this._ctx(this._base);
+    for (const q of player.byMag) {
+      const shownAt = player.shown.get(q);
+      if (shownAt != null && now - shownAt >= POP_MS) this._drawAt(ctx, q, ramp, span);
+    }
+    this._lastBase = now;
+    this._pending = this._pending.filter((q) => now - player.shown.get(q) < POP_MS);
+    this._ctx(this._top);
+  },
+  _drawAt(ctx, q, ramp, span, p = 1) {
+    const [x, y] = this._point(q);
+    const r = radiusFor(q.mag);
+    if (!this._visible(x, y, r)) return;
+    const age = clamp((player.t - q.t) / span, 0, 1);
+    this._circle(ctx, x, y, r, ramp(age), 0.92 - 0.45 * age, player.t - q.t < HOUR, p);
+  },
+  // Hver rammi: grunnlag með millibili sem vex með fjölda, topplag með öllu sem grunnlagið nær ekki enn til
+  draw(now, fresh) {
+    this._pending.push(...fresh);
+    const interval = clamp(player.shown.size / 25, 16, 500);
+    if (now - this._lastBase >= interval) this.redrawAll(now);
+    const span = Math.max(player.range[1] - player.range[0], 1);
+    const ramp = makeRamp();
+    const ctx = this._ctx(this._top);
+    for (const q of this._pending) this._drawAt(ctx, q, ramp, span, clamp((now - player.shown.get(q)) / POP_MS, 0, 1));
+  },
+});
 
 function renderLegend(win) {
   const stops = RAMPS[dark() ? 'dark' : 'light'];
@@ -327,10 +509,9 @@ function renderLegend(win) {
 
 function focusQuake(q) {
   setView('map');
-  const m = markers.get(q);
-  if (!m) return;
-  map.setView(m.getLatLng(), Math.max(map.getZoom(), 11));
-  m.openTooltip();
+  if (player.active) exitPlayback();
+  map.setView([q.lat, q.lon], Math.max(map.getZoom(), 11));
+  quakeLayer.showTip(q);
 }
 
 // --- Tímalína ---
@@ -580,9 +761,9 @@ function renderTable(list, win) {
 
 // ---------- Afspilun ----------
 // Skjálftar tímabilsins birtast í þeirri röð sem þeir urðu, allt tímabilið á `duration` ms (30 s sjálfgefið).
-// Á kortinu er teiknað á tvö canvas í stað Leaflet-merkja: grunnlag með „settum“ skjálftum sem er
-// endurteiknað með aðlöguðu millibili (litur kólnar með aldri miðað við afspilunartímann), og topplag
-// með nýbirtum skjálftum sem skreppa saman úr yfirstærð með hring sem þenst út, teiknað í hverjum ramma.
+// Á kortinu teiknar QuakeCanvas grunnlag með „settum“ skjálftum, endurteiknað með aðlöguðu millibili
+// (litur kólnar með aldri miðað við afspilunartímann), og topplag með nýbirtum skjálftum sem skreppa
+// saman úr yfirstærð með hring sem þenst út, teiknað í hverjum ramma.
 
 const POP_MS = 700;
 const UI_EVERY = 100; // sleði, tími, tímalína
@@ -601,114 +782,17 @@ const player = {
   lastUi: 0,
   lastStats: 0,
   raf: 0,
-  layer: null,
 };
 
 const playRange = () => state.brush ?? timeWindow();
 
 const durationLabel = (ms) => (ms < 60e3 ? `${ms / 1000} s` : `${ms / 60e3} mín`);
 
-// Litaskali sem fall af aldri (0 = nýr, 1 = jafngamall tímabilinu), flýtiminni fyrir hvern grunnramma
+// Litaskali sem fall af aldri (0 = nýr, 1 = jafngamall tímabilinu), flýtiminni fyrir hverja teikningu
 function makeRamp() {
   const lut = Array.from({ length: 65 }, (_, i) => `rgb(${rampColor(i / 64).join(',')})`);
   return (t) => lut[Math.round(clamp(t, 0, 1) * 64)];
 }
-
-const PlaybackLayer = L.Layer.extend({
-  onAdd(map) {
-    this._map = map;
-    const pane = map.getPanes().overlayPane;
-    this._base = L.DomUtil.create('canvas', 'leaflet-zoom-hide playback-canvas', pane);
-    this._top = L.DomUtil.create('canvas', 'leaflet-zoom-hide playback-canvas', pane);
-    this._pending = []; // nýbirtir skjálftar sem eru ekki enn á grunnlaginu
-    this._lastBase = 0;
-    map.on('moveend zoomend resize', this._reset, this);
-    this._reset();
-  },
-  onRemove(map) {
-    map.off('moveend zoomend resize', this._reset, this);
-    this._base.remove();
-    this._top.remove();
-  },
-  _reset() {
-    const size = this._map.getSize();
-    this._origin = this._map.containerPointToLayerPoint([0, 0]);
-    this._dpr = devicePixelRatio || 1;
-    for (const c of [this._base, this._top]) {
-      L.DomUtil.setPosition(c, this._origin);
-      c.width = size.x * this._dpr;
-      c.height = size.y * this._dpr;
-      c.style.width = `${size.x}px`;
-      c.style.height = `${size.y}px`;
-    }
-    this._size = size;
-    this.redrawAll();
-  },
-  _point(q) {
-    const p = this._map.latLngToLayerPoint([q.lat, q.lon]);
-    return [p.x - this._origin.x, p.y - this._origin.y];
-  },
-  _ctx(canvas) {
-    const ctx = canvas.getContext('2d');
-    ctx.setTransform(this._dpr, 0, 0, this._dpr, 0, 0);
-    ctx.clearRect(0, 0, this._size.x, this._size.y);
-    return ctx;
-  },
-  // Einn skjálfti: fylltur hringur, útlína ef hann er innan klukkustundar frá afspilunartíma,
-  // og í „poppinu“ (p frá 0 til 1) yfirstærð sem skreppur saman ásamt hring sem þenst út og dofnar
-  _draw(ctx, q, ramp, span, p = 1) {
-    const [x, y] = this._point(q);
-    const r = radiusFor(q.mag);
-    if (x < -r * 4 || y < -r * 4 || x > this._size.x + r * 4 || y > this._size.y + r * 4) return;
-    const age = (player.t - q.t) / span;
-    const color = ramp(age);
-    const alpha = 0.92 - 0.45 * clamp(age, 0, 1);
-    const ease = 1 - (1 - p) ** 3;
-    ctx.beginPath();
-    ctx.arc(x, y, r * (1 + 1.4 * (1 - ease)), 0, Math.PI * 2);
-    ctx.fillStyle = color;
-    ctx.globalAlpha = alpha;
-    ctx.fill();
-    const recent = player.t - q.t < HOUR;
-    ctx.lineWidth = recent ? 2 : 1;
-    ctx.strokeStyle = recent ? this._ink : color;
-    ctx.globalAlpha = recent ? 0.9 : Math.min(1, alpha + 0.1);
-    ctx.stroke();
-    if (p < 1) {
-      ctx.beginPath();
-      ctx.arc(x, y, r * (1 + 2.5 * ease) + 2, 0, Math.PI * 2);
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = color;
-      ctx.globalAlpha = (1 - ease) * 0.9;
-      ctx.stroke();
-    }
-    ctx.globalAlpha = 1;
-  },
-  // Grunnlag: allir settir skjálftar, stórir fyrst svo litlir hverfi ekki undir þá
-  redrawAll(now = performance.now()) {
-    this._ink = css('--ink');
-    const span = Math.max(player.range[1] - player.range[0], 1);
-    const ramp = makeRamp();
-    const ctx = this._ctx(this._base);
-    for (const q of player.byMag) {
-      const shownAt = player.shown.get(q);
-      if (shownAt != null && now - shownAt >= POP_MS) this._draw(ctx, q, ramp, span);
-    }
-    this._lastBase = now;
-    this._pending = this._pending.filter((q) => now - player.shown.get(q) < POP_MS);
-    this._ctx(this._top);
-  },
-  // Hver rammi: grunnlag með millibili sem vex með fjölda, topplag með öllu sem grunnlagið nær ekki enn til
-  draw(now, fresh) {
-    this._pending.push(...fresh);
-    const interval = clamp(player.shown.size / 25, 16, 500);
-    if (now - this._lastBase >= interval) this.redrawAll(now);
-    const span = Math.max(player.range[1] - player.range[0], 1);
-    const ramp = makeRamp();
-    const ctx = this._ctx(this._top);
-    for (const q of this._pending) this._draw(ctx, q, ramp, span, clamp((now - player.shown.get(q)) / POP_MS, 0, 1));
-  },
-});
 
 function playheadShapes() {
   if (!player.active) return [];
@@ -724,8 +808,7 @@ function enterPlayback() {
   player.t = player.range[0];
   player.cursor = 0;
   player.shown = new Map();
-  map.removeLayer(quakeLayer);
-  player.layer = new PlaybackLayer().addTo(map);
+  quakeLayer.redrawAll();
   updatePlaybackUi();
 }
 
@@ -733,15 +816,12 @@ function exitPlayback({ rerender = true } = {}) {
   player.playing = false;
   cancelAnimationFrame(player.raf);
   player.active = false;
-  if (player.layer) map.removeLayer(player.layer);
-  player.layer = null;
-  quakeLayer.addTo(map);
   Plotly.relayout('timeline', { shapes: [] });
+  const list = visibleQuakes();
+  const win = timeWindow();
+  renderMap(list, win); // kyrrstæð sýn aftur á canvasið
   if (rerender) {
-    const list = visibleQuakes();
-    const win = timeWindow();
     renderStats(list);
-    renderMap(list, win);
     if (state.view === '3d') render3d(list, win);
   }
   updatePlaybackUi();
@@ -778,7 +858,7 @@ function playbackFrame(now) {
     player.shown.set(q, now);
     fresh.push(q);
   }
-  player.layer.draw(now, fresh);
+  quakeLayer.draw(now, fresh);
   const done = player.t >= player.range[1];
   if (done || now - player.lastUi >= UI_EVERY) {
     player.lastUi = now;
@@ -802,7 +882,7 @@ function seekPlayback(frac) {
   while (player.cursor < player.list.length && player.list[player.cursor].t <= player.t) {
     player.shown.set(player.list[player.cursor++], -Infinity);
   }
-  player.layer.redrawAll();
+  quakeLayer.redrawAll();
   renderStats(player.list.slice(0, player.cursor));
   if (state.view === '3d') renderPlayback3d();
   updatePlaybackUi();
