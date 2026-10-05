@@ -397,12 +397,18 @@ const QuakeCanvas = L.Layer.extend({
   setStatic(list, win) {
     this._list = [...list].sort(byMagDesc);
     this._win = win;
+    // Festur skjálfti lifir af endurhleðslu gagna ef hann er enn í listanum (nýir hlutir, sama gildi)
+    if (this._pinned) {
+      const p = this._pinned;
+      const same = list.find((q) => q.t === p.t && q.lat === p.lat && q.lon === p.lon);
+      same ? this.pin(same) : this.unpin();
+    }
     this.drawStatic();
   },
   drawStatic() {
     this._ink = css('--ink');
     this._clearHover();
-    this._ctx(this._top);
+    this._drawPinned();
     const ctx = this._ctx(this._base);
     const grid = (this._grid = new Map());
     if (!this._win) return;
@@ -446,12 +452,16 @@ const QuakeCanvas = L.Layer.extend({
     if (player.active) return;
     const p = e.layerPoint;
     const hit = this._hit(p.x - this._origin.x, p.y - this._origin.y);
-    if (hit) this.showTip(hit.q);
+    hit ? this.pin(hit.q) : this.unpin();
   },
+  _tooltip(q) {
+    return L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -radiusFor(q.mag)] }).setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q));
+  },
+  // Ábending við músina; hverfur þegar músin fer af skjálftanum
   showTip(q) {
     this._clearHover();
-    const r = radiusFor(q.mag);
-    this._tip = L.tooltip({ className: 'quake-tip', direction: 'top', offset: [0, -r] }).setLatLng([q.lat, q.lon]).setContent(tooltipHtml(q));
+    if (q === this._pinned) return; // festa ábendingin er þegar uppi
+    this._tip = this._tooltip(q);
     this._map.openTooltip(this._tip);
     this._hover = { q };
   },
@@ -459,6 +469,46 @@ const QuakeCanvas = L.Layer.extend({
     if (this._tip) this._map.closeTooltip(this._tip);
     this._tip = null;
     this._hover = null;
+  },
+  // Festur skjálfti (valinn í töflu, tímalínu eða með smelli): auðkenndur með hring og ábendingin
+  // helst uppi þótt kortið hreyfist eða músin fari annað, þar til smellt er annars staðar eða Esc
+  pin(q) {
+    this.unpin();
+    this._pinned = q;
+    this._pinTip = this._tooltip(q);
+    this._map.openTooltip(this._pinTip);
+    this._clearHover();
+    this._drawPinned();
+  },
+  unpin() {
+    if (this._pinTip) this._map.closeTooltip(this._pinTip);
+    this._pinTip = null;
+    this._pinned = null;
+    if (this._size) this._ctx(this._top);
+  },
+  _drawPinned() {
+    const ctx = this._ctx(this._top);
+    const q = this._pinned;
+    if (!q || player.active) return;
+    const [x, y] = this._point(q);
+    const r = radiusFor(q.mag);
+    ctx.beginPath();
+    ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = css('--accent');
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+    ctx.lineWidth = 7;
+    ctx.strokeStyle = css('--surface');
+    ctx.globalAlpha = 0.6;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.beginPath();
+    ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = css('--accent');
+    ctx.stroke();
   },
 
   // --- Afspilun: grunnlag með settum skjálftum, topplag með nýbirtum ---
@@ -514,7 +564,7 @@ function focusQuake(q) {
   setView('map');
   if (player.active) exitPlayback();
   map.setView([q.lat, q.lon], Math.max(map.getZoom(), 11));
-  quakeLayer.showTip(q);
+  quakeLayer.pin(q);
 }
 
 // --- Tímalína ---
@@ -811,6 +861,7 @@ function enterPlayback() {
   player.t = player.range[0];
   player.cursor = 0;
   player.shown = new Map();
+  quakeLayer.unpin();
   quakeLayer.redrawAll();
   updatePlaybackUi();
 }
@@ -920,7 +971,7 @@ function bindPlayback() {
     updatePlaybackUi();
   };
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && player.active) return exitPlayback();
+    if (e.key === 'Escape') return player.active ? exitPlayback() : quakeLayer.unpin();
     // Bilslá í reit eða á hnappi hefur sína eigin merkingu
     if (e.key !== ' ' || state.view === 'table') return;
     if (e.target instanceof Element && e.target.closest('input, select, textarea, button, [contenteditable]')) return;
